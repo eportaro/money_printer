@@ -1,0 +1,20 @@
+{
+  "generated_at": "2026-05-07T16:31:39.442915+00:00",
+  "counts": {
+    "round_snapshots": 713,
+    "polymarket_quotes": 1412,
+    "model_predictions": 701,
+    "simulated_bets": 436,
+    "round_results": 108,
+    "polymarket_markets": 108
+  },
+  "modeling_rows": 701,
+  "resolved_rows": 691,
+  "unique_resolved_rounds": 107,
+  "row_accuracy_pct": 72.65,
+  "first_prediction_round_accuracy_pct": 57.94,
+  "last_prediction_round_accuracy_pct": 88.79,
+  "closed_bets": 436,
+  "bet_win_rate_pct": 44.04,
+  "bet_total_pnl": 83.9996
+}

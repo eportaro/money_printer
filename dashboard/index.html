@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket BTC Round Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="logo">POLYMARKET <span class="accent">ROUNDS</span></div>
+        <div class="header-center">
+            <div class="price-display" id="current-price">$---</div>
+            <div class="win-rate-badge" id="win-rate-display">Win Rate: --%</div>
+        </div>
+        <div class="header-right">
+            <div class="live-dot"></div>
+            <div class="status-text">LIVE FEED</div>
+        </div>
+    </header>
+
+    <main class="round-layout">
+        <!-- Active Round Section -->
+        <section class="active-round-card">
+            <div class="card-header">
+                <h2 class="section-title">PARTIDA ACTUAL</h2>
+                <div class="cutoff-timer" id="cutoff-time">--:--:--</div>
+            </div>
+            
+            <div class="round-main-stats">
+                <div class="stat-box baseline">
+                    <span class="label">BASELINE (OPEN)</span>
+                    <div class="baseline-sync-row">
+                        <span class="value" id="round-open-price">$---</span>
+                        <span class="baseline-source" id="baseline-source">---</span>
+                        <div class="sync-input-group">
+                            <input type="number" id="manual-baseline-input" step="0.01" placeholder="Sync price...">
+                            <button id="sync-baseline-btn">SYNC</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="stat-box prediction">
+                    <span class="label">MODELO ACTIVO</span>
+                    <span class="model-version" id="active-model-label">---</span>
+                    <span class="value" id="round-prediction">---</span>
+                </div>
+                <div class="stat-box live-diff">
+                    <span class="label">DISTANCIA ACTUAL</span>
+                    <span class="value" id="round-dist-open">$0.00</span>
+                </div>
+                <div class="stat-box edge">
+                    <span class="label">EDGE / ACCION</span>
+                    <span class="value" id="round-action">WAIT</span>
+                    <span class="edge-detail" id="round-edge">UP -- | DOWN --</span>
+                </div>
+            </div>
+
+            <div class="prediction-meter">
+                <div class="meter-labels">
+                    <span>BAJISTA</span>
+                    <span id="confidence-val">--% CONFIDENCIA</span>
+                    <span>ALCISTA</span>
+                </div>
+                <div class="meter-bar">
+                    <div class="meter-fill" id="meter-fill" style="width: 50%"></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="analytics-grid">
+            <article class="analysis-card model-card">
+                <div class="card-header compact">
+                    <h2 class="section-title">MODELO Y DATASET</h2>
+                    <span class="pill" id="model-mode-pill">---</span>
+                </div>
+                <div class="metric-grid">
+                    <div>
+                        <span class="label">FILAS MODELADO</span>
+                        <strong id="perf-modeling-rows">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">RONDAS UNICAS</span>
+                        <strong id="perf-rounds">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">FEATURES</span>
+                        <strong id="perf-features">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">EDGE MIN</span>
+                        <strong id="perf-threshold">---</strong>
+                    </div>
+                </div>
+                <p class="analysis-note" id="model-note">Cargando estado del modelo...</p>
+            </article>
+
+            <article class="analysis-card">
+                <div class="card-header compact">
+                    <h2 class="section-title">CALIDAD PREDICTIVA</h2>
+                    <span class="pill muted">SUPABASE</span>
+                </div>
+                <div class="metric-grid">
+                    <div>
+                        <span class="label">POR FILA</span>
+                        <strong id="perf-row-acc">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">PRIMERA/RONDA</span>
+                        <strong id="perf-first-acc">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">ULTIMA/RONDA</span>
+                        <strong id="perf-last-acc">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">ROC-AUC V1</span>
+                        <strong id="perf-roc">---</strong>
+                    </div>
+                </div>
+                <p class="analysis-note">La metrica por fila se infla porque hay varios snapshots dentro de la misma ronda.</p>
+            </article>
+
+            <article class="analysis-card">
+                <div class="card-header compact">
+                    <h2 class="section-title">ESTRATEGIA SIMULADA</h2>
+                    <span class="pill muted">ASK REAL</span>
+                </div>
+                <div class="metric-grid">
+                    <div>
+                        <span class="label">BETS CERRADAS</span>
+                        <strong id="perf-bets">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">WIN RATE</span>
+                        <strong id="perf-bet-win">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">PNL</span>
+                        <strong id="perf-pnl">---</strong>
+                    </div>
+                    <div>
+                        <span class="label">MODELO NUEVO</span>
+                        <strong id="perf-market-ready">---</strong>
+                    </div>
+                </div>
+                <p class="analysis-note">Esta es la metrica mas cercana a la pregunta: si entro en Polymarket, gano o pierdo?</p>
+            </article>
+        </section>
+
+        <section class="chart-section">
+            <div class="card-header compact">
+                <h2 class="section-title">BTCUSDT / TRADINGVIEW</h2>
+                <div class="chart-source">BINANCE</div>
+            </div>
+            <div class="tradingview-widget-container">
+                <div class="tradingview-widget-container__widget"></div>
+                <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+                {
+                    "autosize": true,
+                    "symbol": "BINANCE:BTCUSDT",
+                    "interval": "1",
+                    "timezone": "America/Lima",
+                    "theme": "dark",
+                    "style": "1",
+                    "locale": "es",
+                    "hide_top_toolbar": false,
+                    "hide_legend": false,
+                    "allow_symbol_change": false,
+                    "calendar": false,
+                    "support_host": "https://www.tradingview.com"
+                }
+                </script>
+            </div>
+        </section>
+
+        <!-- Round History Section -->
+        <section class="signals-card">
+            <h2 class="section-title">SENALES SIMULADAS</h2>
+            <div class="table-container">
+                <table id="signals-table">
+                    <thead>
+                        <tr>
+                            <th>HORA</th>
+                            <th>FALTABAN</th>
+                            <th>LADO</th>
+                            <th>ENTRADA</th>
+                            <th>PROB</th>
+                            <th>EDGE</th>
+                            <th>RESULTADO</th>
+                            <th>PNL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signals-body">
+                        <!-- Filled by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="history-card">
+            <h2 class="section-title">HISTORIAL DE PARTIDAS (5 MIN)</h2>
+            <div class="table-container">
+                <table id="rounds-table">
+                    <thead>
+                        <tr>
+                            <th>CORTE</th>
+                            <th>BASELINE</th>
+                            <th>PREDICCIÓN</th>
+                            <th>CIERRE</th>
+                            <th>OUTCOME</th>
+                            <th>ACIERTO</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rounds-body">
+                        <!-- Filled by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="analysis-card guide-card">
+            <div class="card-header compact">
+                <h2 class="section-title">MANUAL RAPIDO DE USO</h2>
+                <span class="pill muted">DECISION</span>
+            </div>
+            <div class="guide-grid">
+                <div>
+                    <strong>1. Baseline</strong>
+                    <p>Compara el baseline de la web con Polymarket. Si no coincide, usa SYNC antes de confiar en la ronda.</p>
+                </div>
+                <div>
+                    <strong>2. Accion</strong>
+                    <p>Solo considera entrada cuando diga BUY UP o BUY DOWN. WAIT significa que el precio no paga suficiente edge.</p>
+                </div>
+                <div>
+                    <strong>3. Edge</strong>
+                    <p>Edge positivo mayor a 7% indica que el modelo ve valor contra el ask actual. No es garantia; es filtro.</p>
+                </div>
+                <div>
+                    <strong>4. Timing</strong>
+                    <p>Las metricas por segundos restantes te dicen en que tramo el sistema ha funcionado mejor o peor.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
