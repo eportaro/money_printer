@@ -18,7 +18,7 @@ from model_runtime import (
 )
 from market_config import WINDOW_SECONDS, next_cutoff as configured_next_cutoff, round_id as configured_round_id, slug_candidates
 from polymarket import PolymarketError, discover_btc_market, fetch_event_prices, fetch_market_quotes
-from price_feed import active_symbol, fetch_recent_candles, source_label
+from price_feed import active_symbol, fetch_recent_candles, oracle_price_at, source_label
 
 load_dotenv()
 
@@ -51,6 +51,9 @@ EXACT_BASELINE_MAX_DELTA_PCT = float(os.getenv("EXACT_BASELINE_MAX_DELTA_PCT", "
 # finalizing it with the (reliable) price-feed close, so provisional rounds don't pile up.
 EXACT_RECONCILE_GIVEUP_SECONDS = int(os.getenv("EXACT_RECONCILE_GIVEUP_SECONDS", "1800"))
 EXACT_BASELINE_SOURCES = {"polymarket_gamma_event_metadata", "manual_sync"}
+# Pyth oracle baseline (the source Polymarket settles on) for the live round.
+ORACLE_BASELINE_SOURCE = "pyth_btc_usd_window_open"
+ALLOW_ORACLE_BASELINE_FOR_ACTION = os.getenv("ALLOW_ORACLE_BASELINE_FOR_ACTION", "true").lower() == "true"
 
 SCHEDULED_BUCKET_CACHE = {}
 LAST_RESOLUTION_CHECK = 0
@@ -156,6 +159,9 @@ def infer_price_feed_baseline(df, next_cutoff):
 def baseline_from_market_or_feed(market, df, next_cutoff):
     feed_baseline = infer_price_feed_baseline(df, next_cutoff)
     feed_source = f"{PRICE_SOURCE_LABEL}_prev_close"
+
+    # 1) Exact Polymarket priceToBeat from gamma (best, but usually only populated
+    #    at/after the round closes; absent during the live round).
     if market and market.get("baseline") is not None:
         market_baseline = float(market["baseline"])
         market_source = market.get("baseline_source") or "polymarket_gamma_event_metadata"
@@ -167,6 +173,15 @@ def baseline_from_market_or_feed(market, df, next_cutoff):
             f"Rejected Polymarket baseline {market_baseline:.2f} from {market_source}; "
             f"feed baseline is {feed_baseline:.2f} (delta {delta:.2f}, {delta_pct:.3f}%)."
         )
+
+    # 2) Live round: read the Pyth oracle (what Polymarket settles on) at the window
+    #    open. Matches the real priceToBeat within a few dollars vs ~$25 for the CEX proxy.
+    if os.getenv("USE_ORACLE_BASELINE", "true").lower() == "true":
+        oracle_baseline = oracle_price_at(next_cutoff - WINDOW_SECONDS)
+        if oracle_baseline is not None:
+            return oracle_baseline, ORACLE_BASELINE_SOURCE
+
+    # 3) Last resort: price-feed previous close.
     return feed_baseline, feed_source
 
 
@@ -176,6 +191,8 @@ def baseline_is_exact(source):
 
 def baseline_allows_action(source):
     if baseline_is_exact(source):
+        return True
+    if ALLOW_ORACLE_BASELINE_FOR_ACTION and source == ORACLE_BASELINE_SOURCE:
         return True
     return ALLOW_PRICE_FEED_BASELINE_FOR_ACTION and source == f"{PRICE_SOURCE_LABEL}_prev_close"
 

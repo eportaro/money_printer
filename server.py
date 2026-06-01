@@ -23,7 +23,7 @@ from model_runtime import (
     select_prediction,
 )
 import db
-from price_feed import active_symbol, fetch_recent_candles, source_label
+from price_feed import active_symbol, fetch_recent_candles, oracle_price_at, source_label
 
 try:
     from polymarket import discover_btc_market, fetch_market_quotes
@@ -52,6 +52,8 @@ REQUIRE_EXACT_BASELINE_FOR_ACTION = os.getenv("REQUIRE_EXACT_BASELINE_FOR_ACTION
 ALLOW_PRICE_FEED_BASELINE_FOR_ACTION = os.getenv("ALLOW_PRICE_FEED_BASELINE_FOR_ACTION", "false").lower() == "true"
 PROXY_BASELINE_MIN_ELAPSED_SECONDS = int(os.getenv("PROXY_BASELINE_MIN_ELAPSED_SECONDS", "60"))
 EXACT_BASELINE_SOURCES = {"polymarket_gamma_event_metadata", "manual_sync"}
+ORACLE_BASELINE_SOURCE = "pyth_btc_usd_window_open"
+ALLOW_ORACLE_BASELINE_FOR_ACTION = os.getenv("ALLOW_ORACLE_BASELINE_FOR_ACTION", "true").lower() == "true"
 
 app = Flask(__name__, static_folder="dashboard", static_url_path="")
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -151,6 +153,8 @@ def baseline_is_exact(source):
 
 def baseline_allows_action(source):
     if baseline_is_exact(source):
+        return True
+    if ALLOW_ORACLE_BASELINE_FOR_ACTION and source == ORACLE_BASELINE_SOURCE:
         return True
     return ALLOW_PRICE_FEED_BASELINE_FOR_ACTION and source == f"{PRICE_SOURCE_LABEL}_prev_close"
 
@@ -860,6 +864,15 @@ def predict():
                     f"feed baseline is {window_open:.2f} (delta {delta:.2f}, {delta_pct:.3f}%)."
                 )
         
+        # If we didn't get the exact Polymarket baseline (usual case during the live
+        # round), use the Pyth oracle at the window open. It's the source Polymarket
+        # settles on, so it matches the real priceToBeat within a few dollars vs ~$25.
+        if baseline_source.startswith(PRICE_SOURCE_LABEL) and os.getenv("USE_ORACLE_BASELINE", "true").lower() == "true":
+            oracle_baseline = oracle_price_at(window_start)
+            if oracle_baseline is not None:
+                window_open = oracle_baseline
+                baseline_source = ORACLE_BASELINE_SOURCE
+
         # Check for manual override
         if cutoff_key in manual_baselines:
             window_open = manual_baselines[cutoff_key]

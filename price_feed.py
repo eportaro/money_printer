@@ -16,6 +16,45 @@ COINBASE_PRODUCT_ID = os.getenv("COINBASE_PRODUCT_ID", "BTC-USD")
 COINBASE_MAX_CANDLES_PER_REQUEST = 290
 
 
+PYTH_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/{ts}"
+PYTH_BTC_USD_FEED_ID = os.getenv(
+    "PYTH_BTC_USD_FEED_ID",
+    "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+)
+_ORACLE_CACHE = {}
+
+
+def oracle_price_at(ts):
+    """BTC/USD price from the Pyth benchmark oracle at unix `ts`.
+
+    Pyth is the same oracle Polymarket settles these BTC up/down markets on, so this
+    reproduces the round's `priceToBeat` within a few dollars (vs ~$25 for a CEX proxy).
+    Returns float or None. Cached per timestamp (a round's baseline is fixed)."""
+    ts = int(ts)
+    if ts in _ORACLE_CACHE:
+        return _ORACLE_CACHE[ts]
+    try:
+        resp = requests.get(
+            PYTH_HERMES_URL.format(ts=ts),
+            params={"ids[]": PYTH_BTC_USD_FEED_ID},
+            headers={"User-Agent": "polymarket-btc-bot/1.0"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        parsed = resp.json().get("parsed") or []
+        if not parsed:
+            return None
+        price = parsed[0]["price"]
+        value = float(int(price["price"]) * (10 ** int(price["expo"])))
+        _ORACLE_CACHE[ts] = value
+        if len(_ORACLE_CACHE) > 500:
+            _ORACLE_CACHE.pop(next(iter(_ORACLE_CACHE)))
+        return value
+    except Exception as exc:
+        print(f"Pyth oracle fetch failed for ts={ts}: {exc}")
+        return None
+
+
 def active_symbol():
     if PRICE_SOURCE == "coinbase":
         return COINBASE_PRODUCT_ID
