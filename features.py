@@ -7,6 +7,7 @@ No external TA library needed.
 
 import numpy as np
 import pandas as pd
+from market_config import WINDOW_MINUTES, WINDOW_MS
 
 
 # ─────────────────────────────────────────────────────────────
@@ -153,10 +154,10 @@ def compute_all_features(df):
 
     # ── Polymarket Context ──
     # Calculate window open for each bar
-    window_id = df['timestamp'] // 300_000
+    window_id = df['timestamp'] // WINDOW_MS
     df['w_open'] = df.groupby(window_id)['open'].transform('first')
     df['dist_to_window_open'] = (c - df['w_open']) / (df['w_open'] + 1e-10) * 100
-    df['minutes_into_window'] = (df['timestamp'] // 60_000) % 5
+    df['minutes_into_window'] = (df['timestamp'] // 60_000) % WINDOW_MINUTES
 
     # ── Trend ──
     df['sma_5'] = sma(c, 5)
@@ -253,7 +254,7 @@ def prepare_dataset(df_1min):
     Now trains on EVERY MINUTE of the window.
     """
     df = compute_all_features(df_1min)
-    df['window_id'] = df['timestamp'] // 300_000
+    df['window_id'] = df['timestamp'] // WINDOW_MS
 
     # Get window results
     window_stats = df.groupby('window_id').agg(
@@ -273,4 +274,3 @@ def prepare_dataset(df_1min):
     meta = df[['timestamp', 'window_id']].copy()
 
     return X, y, meta
-

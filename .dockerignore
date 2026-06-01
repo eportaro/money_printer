@@ -1,8 +1,35 @@
-.venv/
-__pycache__/
-*.pyc
-.env
+# VCS / tooling
 .git/
 .gitignore
-btc_1m_7d_*.csv
+.claude/
+.vscode/
+.idea/
+
+# Python envs / caches
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets (compose injects env at runtime, not from the image)
+.env
+.env.*
+
+# Runtime state, logs, DB backups
+logs/
 *.log
+deploy/
+*.bak
+predictions_db.json
+
+# Large artifacts (mounted from host / scp'd, not baked into the image)
+model_artifacts/*.pkl
+model_artifacts/*.csv
+*.csv
+*.parquet
+
+# Notebooks / reports
+notebooks/
+reports/

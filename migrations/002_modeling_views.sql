@@ -51,7 +51,7 @@ from simulated_bets;
 
 create or replace view model_bucket_performance as
 select
-    width_bucket(seconds_to_cutoff, 0, 300, 10) as time_bucket,
+    width_bucket(seconds_to_cutoff, 0, 900, 15) as time_bucket,
     width_bucket(edge, -0.20, 0.20, 16) as edge_bucket,
     side,
     count(*) as bets,

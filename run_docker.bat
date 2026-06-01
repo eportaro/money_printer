@@ -12,16 +12,19 @@ if errorlevel 1 (
 
 echo.
 echo ==========================================
-echo   Polymarket BTC Round Tracker
+echo   Polymarket BTC Bot - Docker
 echo ==========================================
 echo.
-echo 1. Levantar dashboard solamente
-echo 2. Levantar dashboard + collector
+echo 1. Levantar SQL Server + dashboard solamente
+echo 2. Levantar SQL Server + dashboard + collector
+echo 3. Ver logs en vivo
 echo.
-set /p choice="Elige una opcion [1/2]: "
+set /p choice="Elige una opcion [1/2/3]: "
 
 if "%choice%"=="2" (
     docker compose --profile collector up -d --build
+) else if "%choice%"=="3" (
+    docker compose logs -f app collector
 ) else (
     docker compose up -d --build app
 )
@@ -38,6 +41,9 @@ echo Listo. Dashboard:
 echo http://localhost:5000
 echo.
 echo Para ver logs:
-echo docker compose logs -f app
+echo docker compose logs -f app collector
+echo.
+echo Para detener:
+echo stop_docker.bat
 echo.
 pause

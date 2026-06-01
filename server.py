@@ -9,7 +9,6 @@ import json
 import pickle
 import time
 import threading
-import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -24,25 +23,47 @@ from model_runtime import (
     select_prediction,
 )
 import db
+from price_feed import active_symbol, fetch_recent_candles, source_label
 
 try:
-    from polymarket import discover_btc_5m_market, fetch_market_quotes
+    from polymarket import discover_btc_market, fetch_market_quotes
 except Exception:
-    discover_btc_5m_market = None
+    discover_btc_market = None
     fetch_market_quotes = None
+from market_config import MARKET_INTERVAL, WINDOW_MS, WINDOW_SECONDS, next_cutoff as configured_next_cutoff, round_start, slug_candidates
 
 load_dotenv()
 
 # ─── Config ───
 MODEL_DIR = "model_artifacts"
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
-SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
+SYMBOL = active_symbol()
+PRICE_SOURCE_LABEL = source_label()
 PREDICTIONS_FILE = "predictions_db.json"
 MAX_HISTORY = 200
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.03"))
 ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", "market-aware-v1")
+MODEL_STAGE = os.getenv("MODEL_STAGE", "production")
+PERSIST_FROM_SERVER = os.getenv("PERSIST_FROM_SERVER", "false").lower() == "true"
+PERFORMANCE_CACHE_SECONDS = int(os.getenv("PERFORMANCE_CACHE_SECONDS", "60"))
+POLYMARKET_MARKET_REFRESH_SECONDS = int(os.getenv("POLYMARKET_MARKET_REFRESH_SECONDS", "30"))
+BASELINE_MAX_FEED_DELTA_ABS = float(os.getenv("BASELINE_MAX_FEED_DELTA_ABS", "75"))
+BASELINE_MAX_FEED_DELTA_PCT = float(os.getenv("BASELINE_MAX_FEED_DELTA_PCT", "0.12"))
+REQUIRE_EXACT_BASELINE_FOR_ACTION = os.getenv("REQUIRE_EXACT_BASELINE_FOR_ACTION", "true").lower() == "true"
+ALLOW_PRICE_FEED_BASELINE_FOR_ACTION = os.getenv("ALLOW_PRICE_FEED_BASELINE_FOR_ACTION", "false").lower() == "true"
+PROXY_BASELINE_MIN_ELAPSED_SECONDS = int(os.getenv("PROXY_BASELINE_MIN_ELAPSED_SECONDS", "60"))
+EXACT_BASELINE_SOURCES = {"polymarket_gamma_event_metadata", "manual_sync"}
 
 app = Flask(__name__, static_folder="dashboard", static_url_path="")
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    if request.path == "/" or request.path.startswith("/api/") or request.path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 # ─── Load Model & State ───
 model = None
@@ -50,6 +71,40 @@ market_model = None
 metrics = {}
 feat_importance = {}
 active_poly_market = None
+active_poly_market_fetched_at = 0
+performance_cache = {"ts": 0, "payload": None}
+
+QUOTE_COLUMNS = [
+    "up_best_bid",
+    "up_best_ask",
+    "up_midpoint",
+    "up_spread",
+    "up_bid_size",
+    "up_ask_size",
+    "up_last_trade_price",
+    "down_best_bid",
+    "down_best_ask",
+    "down_midpoint",
+    "down_spread",
+    "down_bid_size",
+    "down_ask_size",
+    "down_last_trade_price",
+]
+
+CONTEXT_COLUMNS = [
+    "seconds_to_cutoff",
+    "seconds_bucket",
+    "btc_price",
+    "baseline",
+    "dist_to_baseline",
+    "dist_to_baseline_pct",
+]
+
+
+def active_model_version():
+    if ACTIVE_MODEL == "market-aware-v1" and market_model is not None:
+        return market_model.get("model_version", ACTIVE_MODEL)
+    return ACTIVE_MODEL
 
 
 def load_model():
@@ -66,23 +121,209 @@ def load_model():
         print("WARNING: No trained model found. Run model.py first.")
 
 
-def get_active_poly_market():
-    global active_poly_market
-    expected_slug = f"btc-updown-5m-{(int(time.time()) // 300) * 300}"
-    if active_poly_market is not None and active_poly_market.get("event_slug") != expected_slug:
+def get_active_poly_market(window_start=None):
+    global active_poly_market, active_poly_market_fetched_at
+    current_start = int(window_start) if window_start is not None else round_start()
+    expected_slugs = set(slug_candidates(current_start))
+    refresh_due = (time.time() - active_poly_market_fetched_at) >= POLYMARKET_MARKET_REFRESH_SECONDS
+    if active_poly_market is not None and active_poly_market.get("event_slug") not in expected_slugs:
         active_poly_market = None
-    if active_poly_market is not None:
+    if active_poly_market is not None and active_poly_market.get("baseline") is not None and not refresh_due:
         return active_poly_market
-    if discover_btc_5m_market is None:
+    if discover_btc_market is None:
         return None
     try:
-        active_poly_market = discover_btc_5m_market()
-        db.upsert_market(active_poly_market)
+        active_poly_market = discover_btc_market(window_start=current_start)
+        active_poly_market_fetched_at = time.time()
+        if PERSIST_FROM_SERVER:
+            db.upsert_market(active_poly_market)
         print(f"Polymarket market detected: {active_poly_market.get('question')}")
     except Exception as e:
         print(f"Polymarket market discovery failed: {e}")
         active_poly_market = None
+        active_poly_market_fetched_at = 0
     return active_poly_market
+
+
+def baseline_is_exact(source):
+    return source in EXACT_BASELINE_SOURCES
+
+
+def baseline_allows_action(source):
+    if baseline_is_exact(source):
+        return True
+    return ALLOW_PRICE_FEED_BASELINE_FOR_ACTION and source == f"{PRICE_SOURCE_LABEL}_prev_close"
+
+
+def _directional_action(row):
+    action = row.get("recommended_action")
+    if action in {"BUY_UP", "BUY_DOWN"}:
+        return action
+    return None
+
+
+def _forecast_blocker_reason(row):
+    action = row.get("recommended_action") or "WAIT"
+    if action in {"BUY_UP", "BUY_DOWN"}:
+        return "buy_signal"
+    if not row.get("baseline_exact") and not row.get("baseline_action_allowed"):
+        return "baseline_proxy"
+    if row.get("up_best_ask") is None and row.get("down_best_ask") is None:
+        return "missing_quotes"
+    edge_up = row.get("edge_up")
+    edge_down = row.get("edge_down")
+    viable_edges = [edge for edge in (edge_up, edge_down) if edge is not None]
+    if not viable_edges or max(viable_edges) < EDGE_THRESHOLD:
+        return "edge_below_threshold"
+    return "strategy_or_execution_filter"
+
+
+def _summarize_live_blockers(forecasts, live_trades):
+    resolved = [row for row in forecasts if row.get("outcome") in {"UP", "DOWN"}]
+    action_counts = {}
+    blocker_counts = {}
+    exact_count = 0
+    for row in forecasts:
+        action = row.get("recommended_action") or "WAIT"
+        action_counts[action] = action_counts.get(action, 0) + 1
+        if row.get("baseline_exact"):
+            exact_count += 1
+        reason = _forecast_blocker_reason(row)
+        blocker_counts[reason] = blocker_counts.get(reason, 0) + 1
+
+    resolved_trades = [row for row in live_trades if row.get("result") in {"WIN", "LOSS"}]
+    top_reason = None
+    if blocker_counts:
+        top_reason = sorted(blocker_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
+
+    return {
+        "forecasts": len(forecasts),
+        "resolved_forecasts": len(resolved),
+        "live_trades": len(live_trades),
+        "closed_live_trades": len(resolved_trades),
+        "baseline_exact": exact_count,
+        "baseline_proxy": len(forecasts) - exact_count,
+        "baseline_exact_rate": (exact_count / len(forecasts)) if forecasts else None,
+        "actions": action_counts,
+        "blockers": blocker_counts,
+        "top_blocker": top_reason,
+    }
+
+
+def _enrich_forecasts(predictions, active_version):
+    rows = []
+    for row in predictions:
+        if row.get("model_version") != active_version:
+            continue
+        enriched = dict(row)
+        raw = row.get("prediction_raw") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        raw_baseline_source = (raw or {}).get("baseline_source")
+        snapshot_baseline_source = row.get("baseline_source")
+        enriched["decision_baseline_source"] = snapshot_baseline_source or raw_baseline_source
+        enriched["baseline_exact"] = baseline_is_exact(enriched["decision_baseline_source"])
+        enriched["baseline_action_allowed"] = baseline_allows_action(enriched["decision_baseline_source"])
+        enriched["directional_action"] = _directional_action(row)
+        enriched["blocker_reason"] = _forecast_blocker_reason(enriched)
+        rows.append(enriched)
+    return rows
+
+
+def _flatten_training_features(frame):
+    feature_rows = []
+    for item in frame.get("features", []):
+        if isinstance(item, dict):
+            feature_rows.append(item)
+        elif isinstance(item, str):
+            try:
+                parsed = json.loads(item)
+            except Exception:
+                parsed = {}
+            feature_rows.append(parsed if isinstance(parsed, dict) else {})
+        else:
+            feature_rows.append({})
+    features = pd.json_normalize(feature_rows).add_prefix("feat__")
+    base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
+    matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
+    matrix = matrix.apply(pd.to_numeric, errors="coerce")
+    return matrix.replace([np.inf, -np.inf], np.nan)
+
+
+def _json_value(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return value
+
+
+def _model_test_predictions(limit=50000):
+    if not market_model or not db.db_enabled():
+        return []
+    rows = db.fetch_training_decision_snapshots(limit)
+    if not rows:
+        return []
+    frame = pd.DataFrame(rows)
+    if frame.empty or "target_up" not in frame:
+        return []
+    frame = frame[frame["target_up"].notna()].copy()
+    if frame.empty:
+        return []
+    # Round-based split — consistent with how train_model_v2.py splits
+    unique_rounds = sorted(frame["round_cutoff"].unique())
+    n_test = max(1, int(len(unique_rounds) * 0.25))
+    cutoff_round = unique_rounds[-n_test]
+    test_frame = frame[frame["round_cutoff"] >= cutoff_round].copy().reset_index(drop=True)
+    columns = market_model.get("columns") or market_model.get("feature_columns") or []
+    if not columns:
+        return []
+    x_test = _flatten_training_features(test_frame).reindex(columns=columns)
+    x_test = x_test.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0)
+    probs_up = market_model["model"].predict_proba(x_test)[:, 1]
+    output = []
+    for (_, row), prob_up in zip(test_frame.iterrows(), probs_up):
+        prob_up = float(prob_up)
+        outcome = row.get("outcome")
+        output.append({
+            "snapshot_id": _json_value(row.get("snapshot_id")),
+            "round_id": _json_value(row.get("round_id")),
+            "observed_at": _json_value(row.get("observed_at")),
+            "round_cutoff": _json_value(row.get("round_cutoff")),
+            "seconds_to_cutoff": _json_value(row.get("seconds_to_cutoff")),
+            "seconds_bucket": _json_value(row.get("seconds_bucket")),
+            "btc_price": _json_value(row.get("btc_price")),
+            "baseline": _json_value(row.get("baseline")),
+            "baseline_source": _json_value(row.get("baseline_source")),
+            "up_best_bid": _json_value(row.get("up_best_bid")),
+            "up_best_ask": _json_value(row.get("up_best_ask")),
+            "up_ask_size": _json_value(row.get("up_ask_size")),
+            "down_best_bid": _json_value(row.get("down_best_bid")),
+            "down_best_ask": _json_value(row.get("down_best_ask")),
+            "down_ask_size": _json_value(row.get("down_ask_size")),
+            "prediction": "UP" if prob_up >= 0.5 else "DOWN",
+            "prob_up": prob_up,
+            "prob_down": 1.0 - prob_up,
+            "confidence": abs(prob_up - 0.5) * 2,
+            "actual_close": _json_value(row.get("actual_close")),
+            "outcome": _json_value(outcome),
+            "target_up": 1 if outcome == "UP" else 0 if outcome == "DOWN" else None,
+            "model_version": market_model.get("model_version", active_model_version()),
+            "model_stage": "test_split",
+        })
+    return sorted(output, key=lambda item: str(item.get("observed_at") or ""), reverse=True)
 
 
 def persist_live_prediction(df, df_feat, payload, quotes=None, market=None):
@@ -93,9 +334,12 @@ def persist_live_prediction(df, df_feat, payload, quotes=None, market=None):
     payload.setdefault("db_snapshot_id", None)
     payload.setdefault("db_prediction_id", None)
 
+    if not PERSIST_FROM_SERVER:
+        return
+
     try:
         next_cutoff = payload["next_cutoff"]
-        window_start = next_cutoff - 300
+        window_start = next_cutoff - WINDOW_SECONDS
         current_price = payload["current_price"]
         baseline = payload["window_open"]
         dist = current_price - baseline
@@ -109,11 +353,11 @@ def persist_live_prediction(df, df_feat, payload, quotes=None, market=None):
             "baseline": baseline,
             "dist_to_baseline": dist,
             "dist_to_baseline_pct": (dist / baseline * 100) if baseline else None,
-            "source": "binance",
+            "source": PRICE_SOURCE_LABEL,
             "raw": {"latest_candle": df.iloc[-1].to_dict()},
         })
 
-        market = market or get_active_poly_market()
+        market = market or get_active_poly_market(window_start)
         quotes = quotes or []
         if quotes:
             for quote in quotes:
@@ -195,7 +439,7 @@ def validate_old_predictions():
                 cutoff = int(cutoff_str)
                 # If round has passed (15s buffer)
                 if p.get("outcome") is None and now > cutoff + 15:
-                    df = fetch_recent_candles(10)
+                    df = fetch_recent_candles(max(200, WINDOW_SECONDS // 60 + 10))
                     matching = df[df['timestamp'] >= cutoff * 1000]
                     if not matching.empty:
                         # Use the open price of the cutoff candle as the final close price
@@ -205,18 +449,21 @@ def validate_old_predictions():
                         # Use the actual baseline (manual or calculated)
                         baseline = p.get("manual_baseline") or p["window_open"]
                         is_up = close_price > baseline
-                        
-                        if (p["prediction"] == "UP" and is_up) or (p["prediction"] == "DOWN" and not is_up):
+                        p["actual_outcome"] = "UP" if is_up else "DOWN" if close_price < baseline else "TIE"
+                        evaluated_prediction = p.get("initial_prediction") or p.get("prediction")
+
+                        if (evaluated_prediction == "UP" and is_up) or (evaluated_prediction == "DOWN" and not is_up):
                             p["outcome"] = "WIN"
                         else:
                             p["outcome"] = "LOSS"
-                        db.upsert_round_result({
-                            "round_cutoff": cutoff,
-                            "baseline": baseline,
-                            "actual_close": close_price,
-                            "outcome": "UP" if is_up else "DOWN" if close_price < baseline else "TIE",
-                            "raw": p,
-                        })
+                        if PERSIST_FROM_SERVER:
+                            db.upsert_round_result({
+                                "round_cutoff": cutoff,
+                                "baseline": baseline,
+                                "actual_close": close_price,
+                                "outcome": "UP" if is_up else "DOWN" if close_price < baseline else "TIE",
+                                "raw": p,
+                            })
                         changed = True
             
             if changed:
@@ -229,40 +476,14 @@ def validate_old_predictions():
 load_predictions()
 
 
-def fetch_recent_candles(n=200):
-    """Fetch the last N 1-minute candles from Binance."""
-    params = {"symbol": SYMBOL, "interval": "1m", "limit": n}
-    resp = requests.get(BINANCE_URL, params=params, timeout=15)
-    resp.raise_for_status()
-    raw = resp.json()
-    candles = []
-    for c in raw:
-        candles.append({
-            "timestamp": c[0],
-            "open": float(c[1]),
-            "high": float(c[2]),
-            "low": float(c[3]),
-            "close": float(c[4]),
-            "volume_btc": float(c[5]),
-            "volume_usdt": float(c[7]),
-            "num_trades": int(c[8]),
-            "taker_buy_base": float(c[9]),
-            "taker_buy_quote": float(c[10]),
-        })
-    return pd.DataFrame(candles)
-
-
 def get_next_cutoff():
-    """Get the next Polymarket 5-minute cutoff timestamp."""
-    now = int(time.time())
-    next_cut = ((now // 300) + 1) * 300
-    return next_cut
+    """Get the next Polymarket cutoff timestamp."""
+    return configured_next_cutoff()
 
 
 def get_current_window_start():
-    """Get the start of the current 5-minute window."""
-    now = int(time.time())
-    return (now // 300) * 300
+    """Get the start of the current Polymarket window."""
+    return round_start()
 
 
 # ─── Analyst Engine ───
@@ -466,13 +687,13 @@ def generate_analysis(indicators, prob_up, prob_down, confidence, current_price,
     if rolling_vol is not None:
         if rolling_vol > 0.05:
             vol_level = "ALTA"
-            interp = f"Volatilidad 5min: {rolling_vol:.4f}%. Mercado muy movido → más riesgo pero más oportunidad. Predicciones menos confiables."
+            interp = f"Volatilidad {MARKET_INTERVAL}: {rolling_vol:.4f}%. Mercado muy movido; predicciones menos confiables."
         elif rolling_vol > 0.02:
             vol_level = "MODERADA"
-            interp = f"Volatilidad 5min: {rolling_vol:.4f}%. Movimiento normal del mercado. Buen entorno para predicciones."
+            interp = f"Volatilidad {MARKET_INTERVAL}: {rolling_vol:.4f}%. Movimiento normal del mercado. Buen entorno para predicciones."
         else:
             vol_level = "BAJA"
-            interp = f"Volatilidad 5min: {rolling_vol:.4f}%. Mercado tranquilo → movimientos pequeños. Las predicciones son más confiables pero las oportunidades menores."
+            interp = f"Volatilidad {MARKET_INTERVAL}: {rolling_vol:.4f}%. Mercado tranquilo; las predicciones son más confiables pero las oportunidades menores."
         analysis["details"]["volatility"] = {
             "name": "Volatilidad", "value": f"{rolling_vol:.4f}%", "signal": vol_level, "emoji": "📊",
             "interpretation": interp
@@ -536,7 +757,7 @@ def generate_analysis(indicators, prob_up, prob_down, confidence, current_price,
         verdict = "ALCISTA"
         risk = "MEDIO"
         conclusion_parts.append(f"📊 VEREDICTO: ALCISTA — {bullish_count} de {total} señales son alcistas.")
-        conclusion_parts.append(f"Los indicadores técnicos favorecen una subida en los próximos 5 minutos.")
+        conclusion_parts.append(f"Los indicadores técnicos favorecen una subida en los próximos {WINDOW_SECONDS // 60} minutos.")
         if confidence > 0.3:
             conclusion_parts.append("El modelo ML también respalda esta dirección con confianza moderada-alta.")
         else:
@@ -545,7 +766,7 @@ def generate_analysis(indicators, prob_up, prob_down, confidence, current_price,
         verdict = "BAJISTA"
         risk = "MEDIO"
         conclusion_parts.append(f"📊 VEREDICTO: BAJISTA — {bearish_count} de {total} señales son bajistas.")
-        conclusion_parts.append(f"Los indicadores técnicos apuntan a una caída en los próximos 5 minutos.")
+        conclusion_parts.append(f"Los indicadores técnicos apuntan a una caída en los próximos {WINDOW_SECONDS // 60} minutos.")
         if confidence > 0.3:
             conclusion_parts.append("El modelo ML confirma la presión vendedora.")
         else:
@@ -595,7 +816,7 @@ def index():
 
 @app.route("/api/predict")
 def predict():
-    """Live prediction for the current/next 5-minute round."""
+    """Live prediction for the current/next Polymarket round."""
     if model is None:
         return jsonify({"error": "Model not loaded. Train first."}), 503
 
@@ -604,13 +825,12 @@ def predict():
         current_price = float(df.iloc[-1]['close'])
         next_cutoff = get_next_cutoff()
         cutoff_key = str(next_cutoff)
-        
-        market = get_active_poly_market()
 
         # Window open (Baseline)
         # Polymarket "Precio a superar" is often the CLOSE of the last minute
-        window_start = next_cutoff - 300
+        window_start = next_cutoff - WINDOW_SECONDS
         window_start_ms = window_start * 1000
+        market = get_active_poly_market(window_start)
         
         # We look for the candle ending at exactly window_start
         # Which is the one with timestamp (window_start - 60)
@@ -619,16 +839,26 @@ def predict():
         
         if not prev_candle.empty:
             window_open = float(prev_candle.iloc[0]['close'])
-            baseline_source = "binance_prev_close"
+            baseline_source = f"{PRICE_SOURCE_LABEL}_prev_close"
         else:
             # Fallback to the open of the first candle of the window
             window_candles = df[df['timestamp'] >= window_start_ms]
             window_open = float(window_candles.iloc[0]['open']) if len(window_candles) > 0 else current_price
-            baseline_source = "binance_window_open"
+            baseline_source = f"{PRICE_SOURCE_LABEL}_window_open"
 
         if market and market.get("baseline"):
-            window_open = float(market["baseline"])
-            baseline_source = "polymarket_gamma"
+            market_baseline = float(market["baseline"])
+            market_source = market.get("baseline_source") or "polymarket_gamma_event_metadata"
+            delta = abs(market_baseline - window_open)
+            delta_pct = (delta / window_open * 100) if window_open else 0
+            if delta <= BASELINE_MAX_FEED_DELTA_ABS and delta_pct <= BASELINE_MAX_FEED_DELTA_PCT:
+                window_open = market_baseline
+                baseline_source = market_source
+            else:
+                print(
+                    f"Rejected Polymarket baseline {market_baseline:.2f} from {market_source}; "
+                    f"feed baseline is {window_open:.2f} (delta {delta:.2f}, {delta_pct:.3f}%)."
+                )
         
         # Check for manual override
         if cutoff_key in manual_baselines:
@@ -638,9 +868,8 @@ def predict():
         # Features & base prediction
         df_feat = compute_all_features(df)
         
-        # CRITICAL: Overwrite the window-open used in features if we have a manual sync
-        if cutoff_key in manual_baselines:
-            df_feat.loc[df_feat.index[-1], 'dist_to_window_open'] = (current_price - window_open) / (window_open + 1e-10) * 100
+        # Keep the model's distance feature aligned with the same baseline shown on the dashboard.
+        df_feat.loc[df_feat.index[-1], 'dist_to_window_open'] = (current_price - window_open) / (window_open + 1e-10) * 100
         
         base_pred = base_prediction(model, df_feat)
 
@@ -654,6 +883,8 @@ def predict():
         dist = current_price - window_open
         dist_pct = (dist / window_open * 100) if window_open else None
         seconds_to_cutoff = max(0, next_cutoff - int(time.time()))
+        display_buckets = [5, 15, 30, 60, 90, 120, 180, 240, 360, 480, 600, 720, 840, 895]
+        seconds_bucket = next((b for b in display_buckets if seconds_to_cutoff <= b), 895)
         base_edge = edge_from_probabilities(base_pred["prob_up"], quotes, EDGE_THRESHOLD)
         context = {
             "seconds_to_cutoff": seconds_to_cutoff,
@@ -669,8 +900,51 @@ def predict():
         }
         final_pred = select_prediction(ACTIVE_MODEL, base_pred, market_model, context, quotes)
         edge = edge_from_probabilities(final_pred["prob_up"], quotes, EDGE_THRESHOLD)
+        baseline_exact = baseline_is_exact(baseline_source)
+        baseline_action_allowed = baseline_allows_action(baseline_source)
+        raw_recommended_action = edge["recommended_action"]
+        recommended_action = raw_recommended_action
+        if REQUIRE_EXACT_BASELINE_FOR_ACTION and not baseline_action_allowed:
+            recommended_action = "WAIT"
+        elif not baseline_exact and seconds_to_cutoff > WINDOW_SECONDS - PROXY_BASELINE_MIN_ELAPSED_SECONDS:
+            recommended_action = "WAIT"
+        quotes_by_side = {q.get("outcome"): q for q in quotes}
+        up_quote = quotes_by_side.get("UP") or {}
+        down_quote = quotes_by_side.get("DOWN") or {}
+        quote_summary = {
+            "up_bid": up_quote.get("best_bid"),
+            "up_ask": up_quote.get("best_ask"),
+            "up_midpoint": up_quote.get("midpoint"),
+            "up_spread": up_quote.get("spread"),
+            "down_bid": down_quote.get("best_bid"),
+            "down_ask": down_quote.get("best_ask"),
+            "down_midpoint": down_quote.get("midpoint"),
+            "down_spread": down_quote.get("spread"),
+        }
 
-        # Update current round
+        existing_round = prediction_rounds.get(cutoff_key, {})
+        initial_prediction = existing_round.get("initial_prediction")
+        initial_prob_up = existing_round.get("initial_prob_up")
+        initial_prob_down = existing_round.get("initial_prob_down")
+        initial_confidence = existing_round.get("initial_confidence")
+        initial_timestamp = existing_round.get("initial_timestamp")
+        initial_seconds_to_cutoff = existing_round.get("initial_seconds_to_cutoff")
+        initial_action = existing_round.get("initial_recommended_action")
+        initial_edge_up = existing_round.get("initial_edge_up")
+        initial_edge_down = existing_round.get("initial_edge_down")
+
+        if initial_prediction is None:
+            initial_prediction = final_pred["prediction"]
+            initial_prob_up = round(final_pred["prob_up"], 4)
+            initial_prob_down = round(final_pred["prob_down"], 4)
+            initial_confidence = round(final_pred["confidence"], 4)
+            initial_timestamp = int(time.time())
+            initial_seconds_to_cutoff = seconds_to_cutoff
+            initial_action = recommended_action
+            initial_edge_up = None if edge["edge_up"] is None else round(edge["edge_up"], 4)
+            initial_edge_down = None if edge["edge_down"] is None else round(edge["edge_down"], 4)
+
+        # Update live fields while preserving the initial 15m forecast.
         prediction_rounds[cutoff_key] = {
             "next_cutoff": next_cutoff,
             "window_open": window_open, # This is the active baseline
@@ -680,8 +954,21 @@ def predict():
             "prob_down": round(final_pred["prob_down"], 4),
             "confidence": round(final_pred["confidence"], 4),
             "model_version": final_pred.get("model_version", ACTIVE_MODEL),
+            "model_stage": MODEL_STAGE,
             "active_model": ACTIVE_MODEL,
+            "initial_prediction": initial_prediction,
+            "initial_prob_up": initial_prob_up,
+            "initial_prob_down": initial_prob_down,
+            "initial_confidence": initial_confidence,
+            "initial_timestamp": initial_timestamp,
+            "initial_seconds_to_cutoff": initial_seconds_to_cutoff,
+            "initial_recommended_action": initial_action,
+            "initial_edge_up": initial_edge_up,
+            "initial_edge_down": initial_edge_down,
             "baseline_source": baseline_source,
+            "baseline_exact": baseline_exact,
+            "baseline_action_allowed": baseline_action_allowed,
+            "baseline_warning": None if baseline_exact else "Exact Polymarket/Chainlink baseline not available; using allowed price-feed proxy." if baseline_action_allowed else "Exact Polymarket/Chainlink baseline not available yet; action held at WAIT.",
             "resolution_source": (market or {}).get("resolution_source"),
             "base_prediction": {
                 "prediction": base_pred["prediction"],
@@ -694,10 +981,16 @@ def predict():
             "edge_down": None if edge["edge_down"] is None else round(edge["edge_down"], 4),
             "up_ask": edge["up_ask"],
             "down_ask": edge["down_ask"],
-            "recommended_action": edge["recommended_action"],
+            "quote_summary": quote_summary,
+            "raw_recommended_action": raw_recommended_action,
+            "recommended_action": recommended_action,
             "current_price": current_price,
+            "seconds_to_cutoff": seconds_to_cutoff,
+            "seconds_bucket": seconds_bucket,
             "timestamp": int(time.time()),
-            "outcome": None
+            "actual_close": existing_round.get("actual_close"),
+            "actual_outcome": existing_round.get("actual_outcome"),
+            "outcome": existing_round.get("outcome")
         }
         persist_live_prediction(df, df_feat, prediction_rounds[cutoff_key], quotes=quotes, market=market)
         save_predictions()
@@ -727,7 +1020,9 @@ def sync_history_baseline():
             # Recalculate outcome if actual_close exists
             if p.get("actual_close"):
                 is_up = p["actual_close"] > price
-                if (p["prediction"] == "UP" and is_up) or (p["prediction"] == "DOWN" and not is_up):
+                p["actual_outcome"] = "UP" if is_up else "DOWN" if p["actual_close"] < price else "TIE"
+                evaluated_prediction = p.get("initial_prediction") or p.get("prediction")
+                if (evaluated_prediction == "UP" and is_up) or (evaluated_prediction == "DOWN" and not is_up):
                     p["outcome"] = "WIN"
                 else:
                     p["outcome"] = "LOSS"
@@ -747,6 +1042,8 @@ def rounds():
     try:
         if db.db_enabled():
             try:
+                rows = db.fetch_recent_rounds_v2(50)
+            except Exception:
                 rows = db._get(
                     "modeling_snapshots",
                     {
@@ -755,8 +1052,6 @@ def rounds():
                         "limit": 500,
                     },
                 )
-            except Exception:
-                rows = []
 
             by_cutoff = {}
             for row in rows:
@@ -767,24 +1062,32 @@ def rounds():
                 actual_close = row.get("actual_close")
                 actual_outcome = row.get("outcome")
                 prediction = row.get("prediction")
+                evaluated_prediction = row.get("initial_prediction") or prediction
                 hit = None
-                if actual_outcome in {"UP", "DOWN"} and prediction in {"UP", "DOWN"}:
-                    hit = "WIN" if prediction == actual_outcome else "LOSS"
+                if actual_outcome in {"UP", "DOWN"} and evaluated_prediction in {"UP", "DOWN"}:
+                    hit = "WIN" if evaluated_prediction == actual_outcome else "LOSS"
                 by_cutoff[cutoff] = {
                     "next_cutoff": cutoff,
                     "window_open": float(baseline) if baseline is not None else None,
+                    "initial_prediction": row.get("initial_prediction"),
+                    "initial_prob_up": row.get("initial_prob_up"),
+                    "initial_observed_at": row.get("initial_observed_at"),
                     "prediction": prediction,
                     "prob_up": row.get("prob_up"),
                     "actual_close": float(actual_close) if actual_close is not None else None,
                     "actual_outcome": actual_outcome,
                     "outcome": hit,
                     "observed_at": row.get("observed_at"),
-                    "source": "supabase",
+                    "source": db.db_backend(),
+                    "baseline_source": row.get("baseline_source"),
+                    "resolution_source": row.get("resolution_source"),
+                    "model_version": row.get("model_version"),
+                    "model_stage": row.get("model_stage"),
                 }
             if by_cutoff:
                 return jsonify(sorted(by_cutoff.values(), key=lambda x: x["next_cutoff"], reverse=True)[:50])
     except Exception as e:
-        print(f"Supabase rounds failed: {e}")
+        print(f"DB rounds failed: {e}")
 
     sorted_rounds = sorted(prediction_rounds.values(), key=lambda x: x["next_cutoff"], reverse=True)
     return jsonify(sorted_rounds)
@@ -795,13 +1098,18 @@ def stats():
     """Calculate win rate from validated rounds."""
     try:
         if db.db_enabled():
-            bets = db.fetch_recent_simulated_bets(1000)
+            try:
+                bets = db.fetch_recent_signals_v2(1000)
+                source = f"{db.db_backend()}_strategy_performance_v2"
+            except Exception:
+                bets = db.fetch_recent_simulated_bets(1000)
+                source = f"{db.db_backend()}_simulated_bets"
             validated_bets = [b for b in bets if b.get("result") in {"WIN", "LOSS"}]
             if validated_bets:
                 wins = len([b for b in validated_bets if b["result"] == "WIN"])
                 pnl = sum(float(b.get("pnl") or 0) for b in validated_bets)
                 return jsonify({
-                    "source": "supabase_simulated_bets",
+                    "source": source,
                     "win_rate": round(wins / len(validated_bets) * 100, 1),
                     "total": len(validated_bets),
                     "wins": wins,
@@ -827,16 +1135,21 @@ def stats():
 
 @app.route("/api/signals")
 def signals():
-    """Recent simulated entries from Supabase."""
+    """Recent simulated entries from the configured DB."""
     try:
         limit = min(int(request.args.get("limit", 25)), 100)
-        rows = db.fetch_recent_simulated_bets(limit)
+        try:
+            rows = db.fetch_recent_signals_v2(limit)
+            source = "v2"
+        except Exception:
+            rows = db.fetch_recent_simulated_bets(limit)
+            source = "v1"
         enriched = []
         for row in rows:
             raw = row.get("raw") or {}
             resolved = raw.get("resolved") or {}
             enriched.append({
-                "id": row.get("id"),
+                "id": row.get("signal_id") or row.get("id"),
                 "observed_at": row.get("observed_at"),
                 "round_cutoff": row.get("round_cutoff"),
                 "side": row.get("side"),
@@ -846,11 +1159,17 @@ def signals():
                 "edge": row.get("edge"),
                 "result": row.get("result"),
                 "pnl": row.get("pnl"),
-                "seconds_to_cutoff": raw.get("seconds_to_cutoff"),
-                "btc_price": raw.get("btc_price"),
-                "baseline": raw.get("baseline"),
-                "actual_close": resolved.get("actual_close"),
-                "outcome": resolved.get("outcome"),
+                "seconds_to_cutoff": row.get("seconds_to_cutoff") or raw.get("seconds_to_cutoff"),
+                "seconds_bucket": row.get("seconds_bucket"),
+                "btc_price": row.get("btc_price") or raw.get("btc_price"),
+                "baseline": row.get("baseline") or raw.get("baseline"),
+                "baseline_source": row.get("baseline_source"),
+                "actual_close": row.get("actual_close") or resolved.get("actual_close"),
+                "outcome": row.get("outcome") or resolved.get("outcome"),
+                "model_version": row.get("model_version"),
+                "model_stage": row.get("model_stage"),
+                "strategy_version": row.get("strategy_version"),
+                "source": source,
             })
         return jsonify(enriched)
     except Exception as e:
@@ -865,9 +1184,9 @@ def price():
         minutes = min(minutes, 500)
         df = fetch_recent_candles(minutes)
 
-        # Aggregate to 5-minute candles for the chart
-        df['window'] = df['timestamp'] // 300_000
-        candles_5m = df.groupby('window').agg(
+        # Aggregate to market-window candles for the chart
+        df['window'] = df['timestamp'] // WINDOW_MS
+        candles_window = df.groupby('window').agg(
             time=('timestamp', 'first'),
             open=('open', 'first'),
             high=('high', 'max'),
@@ -877,11 +1196,32 @@ def price():
         ).reset_index(drop=True)
 
         # Convert timestamp to seconds
-        candles_5m['time'] = (candles_5m['time'] / 1000).astype(int)
+        candles_window['time'] = (candles_window['time'] / 1000).astype(int)
 
         return jsonify({
-            "candles": candles_5m.to_dict(orient="records"),
+            "candles": candles_window.to_dict(orient="records"),
             "current_price": float(df.iloc[-1]['close']),
+            "window_seconds": WINDOW_SECONDS,
+            "market_interval": MARKET_INTERVAL,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/chart-data")
+def chart_data():
+    """Return recent 1-minute candles for the local BTC chart."""
+    try:
+        minutes = int(request.args.get("minutes", 240))
+        minutes = max(60, min(minutes, 720))
+        df = fetch_recent_candles(minutes)
+        df = df.tail(minutes).copy()
+        df["time"] = (df["timestamp"] / 1000).astype(int)
+        return jsonify({
+            "candles": df[["time", "open", "high", "low", "close", "volume_btc"]].to_dict(orient="records"),
+            "current_price": float(df.iloc[-1]["close"]),
+            "source": PRICE_SOURCE_LABEL,
+            "market_interval": MARKET_INTERVAL,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -914,6 +1254,8 @@ def model_info():
         market_metrics = market_model.get("metrics", {})
     return jsonify({
         "active_model": ACTIVE_MODEL,
+        "active_model_alias": ACTIVE_MODEL,
+        "active_model_version": active_model_version(),
         "base_model": "binance-hgb-v1",
         "market_model_available": market_model is not None,
         "metrics": metrics,
@@ -925,7 +1267,11 @@ def model_info():
 
 @app.route("/api/model-performance")
 def model_performance():
-    """Dashboard-ready model and strategy performance from Supabase."""
+    """Dashboard-ready model and strategy performance from the configured DB."""
+    now = time.time()
+    if performance_cache["payload"] and now - performance_cache["ts"] < PERFORMANCE_CACHE_SECONDS:
+        return jsonify(performance_cache["payload"])
+
     try:
         report_path = os.path.join("reports", "supabase_eda_report.json")
         report = {}
@@ -933,61 +1279,65 @@ def model_performance():
             with open(report_path, "r", encoding="utf-8") as f:
                 report = json.load(f)
 
-        rows = []
-        if db.db_enabled():
-            predictions = db._get(
-                "model_predictions",
-                {
-                    "select": "id,observed_at,round_cutoff,model_version,prediction,prob_up,confidence",
-                    "order": "observed_at.asc",
-                    "limit": 5000,
-                },
-            )
-            results = db._get(
-                "round_results",
-                {
-                    "select": "round_cutoff,outcome",
-                    "order": "round_cutoff.asc",
-                    "limit": 5000,
-                },
-            )
-            outcome_by_cutoff = {int(r["round_cutoff"]): r.get("outcome") for r in results}
-            for row in predictions:
-                outcome = outcome_by_cutoff.get(int(row["round_cutoff"]))
-                if outcome in {"UP", "DOWN"}:
-                    row["target_up"] = 1 if outcome == "UP" else 0
-                    rows.append(row)
-
-        model_rows = pd.DataFrame(rows)
         model_cards = []
-        if not model_rows.empty:
-            model_rows["target_up"] = pd.to_numeric(model_rows["target_up"], errors="coerce")
-            model_rows["prob_up"] = pd.to_numeric(model_rows["prob_up"], errors="coerce")
-            model_rows["pred_up"] = (model_rows["prob_up"] >= 0.5).astype(int)
-            model_rows["correct"] = model_rows["pred_up"].eq(model_rows["target_up"].astype(int))
-            for version, group in model_rows.groupby("model_version", dropna=False):
-                version_name = version or "unknown"
-                first = group.sort_values("observed_at").groupby("round_cutoff", as_index=False).first()
-                last = group.sort_values("observed_at").groupby("round_cutoff", as_index=False).last()
-                model_cards.append({
-                    "model_version": version_name,
-                    "rows": int(len(group)),
-                    "unique_rounds": int(group["round_cutoff"].nunique()),
-                    "row_accuracy": round(float(group["correct"].mean() * 100), 2),
-                    "first_round_accuracy": round(float(first["correct"].mean() * 100), 2) if len(first) else None,
-                    "last_round_accuracy": round(float(last["correct"].mean() * 100), 2) if len(last) else None,
-                })
-
         bets = []
         if db.db_enabled():
-            bets = db.fetch_recent_simulated_bets(1000)
+            try:
+                model_cards = db.fetch_model_performance_v2()
+                bets = db.fetch_recent_signals_v2(1000)
+                report = {**report, **(db.fetch_dataset_summary_v2() or {})}
+            except Exception:
+                rows = []
+                predictions = db._get(
+                    "model_predictions",
+                    {
+                        "select": "id,observed_at,round_cutoff,model_version,prediction,prob_up,confidence",
+                        "order": "observed_at.asc",
+                        "limit": 5000,
+                    },
+                )
+                results = db._get(
+                    "round_results",
+                    {
+                        "select": "round_cutoff,outcome",
+                        "order": "round_cutoff.asc",
+                        "limit": 5000,
+                    },
+                )
+                outcome_by_cutoff = {int(r["round_cutoff"]): r.get("outcome") for r in results}
+                for row in predictions:
+                    outcome = outcome_by_cutoff.get(int(row["round_cutoff"]))
+                    if outcome in {"UP", "DOWN"}:
+                        row["target_up"] = 1 if outcome == "UP" else 0
+                        rows.append(row)
+                model_rows = pd.DataFrame(rows)
+                if not model_rows.empty:
+                    model_rows["target_up"] = pd.to_numeric(model_rows["target_up"], errors="coerce")
+                    model_rows["prob_up"] = pd.to_numeric(model_rows["prob_up"], errors="coerce")
+                    model_rows["pred_up"] = (model_rows["prob_up"] >= 0.5).astype(int)
+                    model_rows["correct"] = model_rows["pred_up"].eq(model_rows["target_up"].astype(int))
+                    for version, group in model_rows.groupby("model_version", dropna=False):
+                        version_name = version or "unknown"
+                        model_cards.append({
+                            "model_version": version_name,
+                            "model_stage": "legacy",
+                            "rows_scored": int(len(group)),
+                            "unique_rounds": int(group["round_cutoff"].nunique()),
+                            "row_accuracy": round(float(group["correct"].mean() * 100), 2),
+                        })
+                bets = db.fetch_recent_simulated_bets(1000)
+
         closed_bets = [b for b in bets if b.get("result") in {"WIN", "LOSS"}]
         wins = len([b for b in closed_bets if b.get("result") == "WIN"])
         pnl = sum(float(b.get("pnl") or 0) for b in closed_bets)
 
-        return jsonify({
-            "active_model": ACTIVE_MODEL,
+        payload = {
+            "active_model": active_model_version(),
+            "active_model_alias": ACTIVE_MODEL,
+            "active_model_version": active_model_version(),
+            "db_backend": db.db_backend(),
             "edge_threshold": EDGE_THRESHOLD,
+            "persist_from_server": PERSIST_FROM_SERVER,
             "report": report,
             "models": model_cards,
             "strategy": {
@@ -1002,32 +1352,231 @@ def model_performance():
                 "market_metrics": (market_model or {}).get("metrics", {}) if market_model else {},
                 "market_model_available": market_model is not None,
             },
-        })
+        }
+        performance_cache["ts"] = now
+        performance_cache["payload"] = payload
+        return jsonify(payload)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/dataset-health")
 def dataset_health():
-    """Basic Supabase row counts and latest model dataset status."""
+    """Basic DB row counts and latest model dataset status."""
     try:
-        tables = [
-            "round_snapshots",
-            "polymarket_quotes",
-            "model_predictions",
-            "simulated_bets",
-            "round_results",
-            "polymarket_markets",
-        ]
-        counts = {table: db.count_rows(table) for table in tables}
+        if db.sqlserver_enabled():
+            tables = [
+                "rounds",
+                "reference_prices",
+                "decision_snapshots",
+                "market_quotes",
+                "feature_snapshots",
+                "predictions_v2",
+                "signals_v2",
+                "round_results",
+                "trade_results_v2",
+                "dataset_versions",
+                "model_runs",
+            ]
+        else:
+            tables = [
+                "round_snapshots",
+                "polymarket_quotes",
+                "model_predictions",
+                "simulated_bets",
+                "round_results",
+                "polymarket_markets",
+                "rounds",
+                "reference_prices",
+                "decision_snapshots",
+                "market_quotes",
+                "feature_snapshots",
+                "predictions_v2",
+                "signals_v2",
+                "trade_results_v2",
+                "dataset_versions",
+                "model_runs",
+            ]
+        counts = {}
+        for table in tables:
+            try:
+                counts[table] = db.count_rows(table)
+            except Exception:
+                counts[table] = None
         recent_results = db.fetch_recent_round_results(5)
-        recent_bets = db.fetch_recent_simulated_bets(5)
+        try:
+            recent_bets = db.fetch_recent_signals_v2(5)
+        except Exception:
+            recent_bets = db.fetch_recent_simulated_bets(5)
         return jsonify({
             "db_enabled": db.db_enabled(),
+            "db_backend": db.db_backend(),
             "counts": counts,
             "recent_round_results": recent_results,
-            "recent_simulated_bets": recent_bets,
+            "recent_signals": recent_bets,
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dashboard-data")
+def dashboard_data():
+    """Operational dashboard data with predictions, signals, rounds, and metadata."""
+    try:
+        prediction_limit = min(int(request.args.get("prediction_limit", 5000)), 20000)
+        signal_limit = min(int(request.args.get("signal_limit", 5000)), 10000)
+        round_limit = min(int(request.args.get("round_limit", 250)), 1000)
+
+        predictions = db.fetch_dashboard_predictions(prediction_limit) if db.db_enabled() else []
+        active_version = active_model_version()
+        all_live_signals_rows = db.fetch_dashboard_signals(signal_limit) if db.db_enabled() else []
+        live_active_signals_rows = [
+            row for row in all_live_signals_rows
+            if row.get("model_version") == active_version
+        ]
+        legacy_signals_rows = [
+            row for row in all_live_signals_rows
+            if row.get("model_version") != active_version
+        ]
+        backtest_run = db.fetch_latest_strategy_backtest_run(active_version, "dashboard-strategies-v1") if db.db_enabled() else None
+        backtest_signals_rows = db.fetch_strategy_backtest_signals(active_version, signal_limit, "dashboard-strategies-v1") if db.db_enabled() else []
+        active_forecasts_rows = _enrich_forecasts(predictions, active_version)
+        model_test_predictions = _model_test_predictions(prediction_limit)
+        live_blockers_summary = _summarize_live_blockers(active_forecasts_rows, live_active_signals_rows)
+        signals_rows = backtest_signals_rows
+        rounds_rows = db.fetch_recent_rounds_v2(round_limit) if db.db_enabled() else []
+        model_cards = db.fetch_model_performance_v2() if db.db_enabled() else []
+        dataset_summary = db.fetch_dataset_summary_v2() if db.db_enabled() else {}
+        table_names = [
+            "rounds",
+            "reference_prices",
+            "decision_snapshots",
+            "market_quotes",
+            "feature_snapshots",
+            "predictions_v2",
+            "signals_v2",
+            "round_results",
+            "trade_results_v2",
+            "strategy_backtest_runs",
+            "strategy_backtest_signals",
+        ]
+        counts = {}
+        for table in table_names:
+            try:
+                counts[table] = db.count_rows(table)
+            except Exception:
+                counts[table] = None
+
+        return jsonify(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "db_backend": db.db_backend(),
+                "active_model": active_version,
+                "active_model_alias": ACTIVE_MODEL,
+                "active_model_version": active_version,
+                "model_stage": MODEL_STAGE,
+                "edge_threshold": EDGE_THRESHOLD,
+                "signal_source": "strategy_lab",
+                "signal_sources": {
+                    "strategy_lab": {
+                        "label": "Strategy Lab",
+                        "description": "Historical replay plus new active-model forecasts for strategy comparison. Not live PnL.",
+                        "signals": len(backtest_signals_rows),
+                    },
+                    "live_active": {
+                        "label": "Actual Live Paper PnL",
+                        "description": "Closed/live collector signals generated by the active model.",
+                        "signals": len(live_active_signals_rows),
+                    },
+                    "backtest_active": {
+                        "label": "Backtest Active Model",
+                        "description": "Historical replay using the active model. Not live performance.",
+                        "signals": len(backtest_signals_rows),
+                    },
+                    "all_live": {
+                        "label": "All Live Audit",
+                        "description": "All collector signals across model versions.",
+                        "signals": len(all_live_signals_rows),
+                    },
+                },
+                "active_backtest_run": backtest_run,
+                "counts": counts,
+                "predictions": predictions,
+                "model_test_predictions": model_test_predictions,
+                "signals": signals_rows,
+                "active_model_forecasts": active_forecasts_rows,
+                "actual_live_trades": live_active_signals_rows,
+                "strategy_replay": {
+                    "signals": backtest_signals_rows,
+                    "source": "strategy_backtest_signals",
+                    "run": backtest_run,
+                    "dynamic_replay_hint": "Frontend adds resolved active-model forecasts not already represented in the backtest.",
+                },
+                "live_blockers_summary": live_blockers_summary,
+                "live_active_signals": live_active_signals_rows,
+                "backtest_active_signals": backtest_signals_rows,
+                "all_live_signals": all_live_signals_rows,
+                "legacy_signals": legacy_signals_rows,
+                "rounds": rounds_rows,
+                "models": model_cards,
+                "dataset_summary": dataset_summary,
+                "training_metrics": {
+                    "base": metrics,
+                    "market": (market_model or {}).get("metrics", {}) if market_model else {},
+                },
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/live-signal-history")
+def live_signal_history():
+    """Lightweight payload for fast live Signal History refreshes."""
+    try:
+        prediction_limit = min(int(request.args.get("prediction_limit", 5000)), 5000)
+        signal_limit = min(int(request.args.get("signal_limit", 5000)), 5000)
+        active_version = active_model_version()
+
+        if not db.db_enabled():
+            return jsonify(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "active_model_version": active_version,
+                    "edge_threshold": EDGE_THRESHOLD,
+                    "active_model_forecasts": [],
+                    "actual_live_trades": [],
+                    "live_active_signals": [],
+                    "live_blockers_summary": {},
+                }
+            )
+
+        try:
+            predictions = db.fetch_live_signal_history_predictions(active_version, prediction_limit)
+        except AttributeError:
+            predictions = [
+                row for row in db.fetch_dashboard_predictions(prediction_limit)
+                if row.get("model_version") == active_version
+            ]
+        all_live_signals_rows = db.fetch_dashboard_signals(signal_limit)
+        live_active_signals_rows = [
+            row for row in all_live_signals_rows
+            if row.get("model_version") == active_version
+        ]
+        active_forecasts_rows = _enrich_forecasts(predictions, active_version)
+
+        return jsonify(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "active_model_version": active_version,
+                "active_model": active_version,
+                "edge_threshold": EDGE_THRESHOLD,
+                "active_model_forecasts": active_forecasts_rows,
+                "actual_live_trades": live_active_signals_rows,
+                "live_active_signals": live_active_signals_rows,
+                "live_blockers_summary": _summarize_live_blockers(active_forecasts_rows, live_active_signals_rows),
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

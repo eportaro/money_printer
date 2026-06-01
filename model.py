@@ -1,5 +1,5 @@
 """
-ML Training Pipeline — Polymarket BTC 5-min Predictor
+ML Training Pipeline — Polymarket BTC configurable-window Predictor
 =====================================================
 Uses HistGradientBoostingClassifier (sklearn) for Python 3.14 compatibility.
 Fetches 30 days of data, trains, calibrates, and saves the model.
@@ -21,6 +21,7 @@ from sklearn.metrics import (
     roc_auc_score, brier_score_loss, log_loss, confusion_matrix
 )
 from features import compute_all_features, prepare_dataset, FEATURE_COLUMNS
+from market_config import WINDOW_SECONDS
 
 # ─── Config ───
 SYMBOL = "BTCUSDT"
@@ -182,6 +183,8 @@ def train_model():
         "up_ratio": round(y.mean(), 4),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "days_of_data": DAYS,
+        "window_seconds": WINDOW_SECONDS,
+        "window_minutes": WINDOW_SECONDS // 60,
     }
 
     cm = confusion_matrix(y_val, y_pred)

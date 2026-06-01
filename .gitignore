@@ -1,19 +1,48 @@
+# Secrets
 .env
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.db
-db.sqlite3
-model_artifacts/*.pkl
-model_artifacts/*.json
+.env.docker
+.env.*
+!.env.example
+!.env.docker.example
+
+# Runtime state / DB backups
 predictions_db.json
-*.csv
-.DS_Store
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
 .venv/
 venv/
 env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Data files (large, tracked separately)
+data/
+*.csv
+*.parquet
+
+# Model artifacts
+model_artifacts/*.pkl
+model_artifacts/*.json
+
+# Logs
+logs/
+
+# IDEs / tooling
 .idea/
 .vscode/
-node_modules/
-docker-compose.override.yml
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+*.egg-info/
+dist/
+build/

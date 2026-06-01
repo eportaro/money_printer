@@ -1,18 +1,53 @@
 services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}"
+      MSSQL_MEMORY_LIMIT_MB: "${MSSQL_MEMORY_LIMIT_MB:-3072}"
+    ports:
+      - "14333:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    env_file:
+      - .env.docker
+    depends_on:
+      - sqlserver
+    command: python scripts/init_sqlserver.py
+    restart: "no"
+
   app:
     build: .
     env_file:
-      - .env
+      - .env.docker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "5000:5000"
+    volumes:
+      - .:/app
     command: python server.py
     restart: unless-stopped
 
   collector:
     build: .
     env_file:
-      - .env
+      - .env.docker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - .:/app
     command: python collector.py
     restart: unless-stopped
     profiles:
       - collector
+
+volumes:
+  mssql-data:

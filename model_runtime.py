@@ -88,24 +88,22 @@ def quote_features(quotes):
             "bid_size",
             "ask_size",
         ):
-            features[f"poly_{prefix}_{field}"] = quote.get(field)
+            features[f"{prefix}_{field}"] = quote.get(field)
     return features
 
 
 def market_feature_frame(market_model, context, technical_features, quotes):
     columns = market_model["columns"]
+    # Technical features are stored in DB with feat__ prefix; add it here for inference
+    feat_prefixed = {f"feat__{k}": v for k, v in (technical_features or {}).items()}
     row = {
         "seconds_to_cutoff": context.get("seconds_to_cutoff"),
+        "seconds_bucket": context.get("seconds_bucket"),
         "btc_price": context.get("btc_price"),
         "baseline": context.get("baseline"),
         "dist_to_baseline": context.get("dist_to_baseline"),
         "dist_to_baseline_pct": context.get("dist_to_baseline_pct"),
-        "prob_up": context.get("base_prob_up"),
-        "prob_down": context.get("base_prob_down"),
-        "confidence": context.get("base_confidence"),
-        "edge_up": context.get("base_edge_up"),
-        "edge_down": context.get("base_edge_down"),
-        **(technical_features or {}),
+        **feat_prefixed,
         **quote_features(quotes),
     }
     frame = pd.DataFrame([{col: row.get(col, 0) for col in columns}])
@@ -118,7 +116,7 @@ def market_prediction(market_model, context, technical_features, quotes):
     prob_up = float(probs[1])
     metrics = market_model.get("metrics", {})
     return {
-        "model_version": "market-aware-v1",
+        "model_version": market_model.get("model_version", "market-aware-v1"),
         "prob_up": prob_up,
         "prob_down": 1.0 - prob_up,
         "prediction": "UP" if prob_up >= 0.5 else "DOWN",

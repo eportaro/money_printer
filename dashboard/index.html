@@ -3,249 +3,441 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polymarket BTC Round Tracker</title>
+    <title>Polymarket BTC Bot Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=20260531-provisional-close">
 </head>
 <body>
-    <header>
-        <div class="logo">POLYMARKET <span class="accent">ROUNDS</span></div>
-        <div class="header-center">
-            <div class="price-display" id="current-price">$---</div>
-            <div class="win-rate-badge" id="win-rate-display">Win Rate: --%</div>
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark">BTC</div>
+            <div>
+                <div class="brand-title">Polymarket Bot</div>
+                <div class="brand-subtitle">15m decision cockpit</div>
+            </div>
         </div>
-        <div class="header-right">
-            <div class="live-dot"></div>
-            <div class="status-text">LIVE FEED</div>
+        <div class="header-metrics">
+            <div class="header-metric">
+                <span>Market</span>
+                <div class="metric-pair">
+                    <b>BTC</b><strong id="hdr-btc">$---</strong>
+                </div>
+                <div class="metric-pair">
+                    <b>Base</b><strong id="hdr-baseline">$---</strong>
+                </div>
+            </div>
+            <div class="header-metric">
+                <span>Round</span>
+                <div class="metric-pair">
+                    <b>Bucket</b><strong id="hdr-bucket">T---</strong>
+                </div>
+                <div class="metric-pair">
+                    <b>Close</b><strong id="hdr-countdown">--:--</strong>
+                </div>
+            </div>
+            <div class="header-metric">
+                <span>View</span>
+                <select id="signal-source">
+                    <option value="model_test">Model Test Split</option>
+                    <option value="live_active">Actual Live Paper PnL</option>
+                </select>
+            </div>
+            <div class="header-metric">
+                <span>Strategy</span>
+                <select id="strategy-source"></select>
+            </div>
+            <div class="header-metric">
+                <span>Current Signal</span>
+                <div class="metric-pair">
+                    <b>Action</b><strong id="hdr-decision">---</strong>
+                </div>
+                <div class="metric-pair">
+                    <b>Age</b><strong id="hdr-decision-age">0s</strong>
+                </div>
+            </div>
+            <div class="header-metric">
+                <span>Signal Perf</span>
+                <div class="metric-pair">
+                    <b>PnL</b><strong id="hdr-pnl">---</strong>
+                </div>
+                <div class="metric-pair">
+                    <b>Win</b><strong id="hdr-winrate">---</strong>
+                </div>
+            </div>
+            <div class="header-metric">
+                <span>Status</span>
+                <div class="metric-pair">
+                    <b>Signals</b><strong id="hdr-signals">---</strong>
+                </div>
+                <div class="metric-pair">
+                    <b>Updated</b><strong id="hdr-updated">---</strong>
+                </div>
+            </div>
         </div>
+        <div class="health-pill" id="collector-health">LIVE</div>
     </header>
 
-    <main class="round-layout">
-        <!-- Active Round Section -->
-        <section class="active-round-card">
-            <div class="card-header">
-                <h2 class="section-title">PARTIDA ACTUAL</h2>
-                <div class="cutoff-timer" id="cutoff-time">--:--:--</div>
-            </div>
-            
-            <div class="round-main-stats">
-                <div class="stat-box baseline">
-                    <span class="label">BASELINE (OPEN)</span>
-                    <div class="baseline-sync-row">
-                        <span class="value" id="round-open-price">$---</span>
-                        <span class="baseline-source" id="baseline-source">---</span>
-                        <div class="sync-input-group">
-                            <input type="number" id="manual-baseline-input" step="0.01" placeholder="Sync price...">
-                            <button id="sync-baseline-btn">SYNC</button>
-                        </div>
+    <main class="dashboard-shell">
+        <section class="panel hero-panel">
+            <div class="section-head">
+                <div>
+                    <p class="eyebrow">Current Round Decision</p>
+                    <div class="decision-title-row">
+                        <h1 id="decision-title">WAIT</h1>
+                        <span class="decision-age badge" id="decision-age">0s</span>
                     </div>
+                    <p id="decision-reason" class="muted">Loading strategy decision...</p>
                 </div>
-                <div class="stat-box prediction">
-                    <span class="label">MODELO ACTIVO</span>
-                    <span class="model-version" id="active-model-label">---</span>
-                    <span class="value" id="round-prediction">---</span>
-                </div>
-                <div class="stat-box live-diff">
-                    <span class="label">DISTANCIA ACTUAL</span>
-                    <span class="value" id="round-dist-open">$0.00</span>
-                </div>
-                <div class="stat-box edge">
-                    <span class="label">EDGE / ACCION</span>
-                    <span class="value" id="round-action">WAIT</span>
-                    <span class="edge-detail" id="round-edge">UP -- | DOWN --</span>
+                <div class="decision-badges">
+                    <span class="badge" id="bucket-badge">T---</span>
+                    <span class="badge" id="alignment-badge">---</span>
+                    <span class="badge" id="baseline-badge">---</span>
                 </div>
             </div>
 
-            <div class="prediction-meter">
-                <div class="meter-labels">
-                    <span>BAJISTA</span>
-                    <span id="confidence-val">--% CONFIDENCIA</span>
-                    <span>ALCISTA</span>
-                </div>
-                <div class="meter-bar">
-                    <div class="meter-fill" id="meter-fill" style="width: 50%"></div>
-                </div>
+            <div class="decision-grid">
+                <article class="metric-card" id="baseline-card">
+                    <span class="label">Baseline / BTC Position</span>
+                    <strong id="baseline-value">$---</strong>
+                    <div class="split-row"><span>BTC actual</span><b id="btc-value">$---</b></div>
+                    <div class="split-row"><span>Distance</span><b id="baseline-distance">---</b></div>
+                    <p id="baseline-copy" class="context-copy">BTC position loading...</p>
+                </article>
+
+                <article class="metric-card">
+                    <span class="label">Model Prediction</span>
+                    <strong id="prediction-value">---</strong>
+                    <div class="prob-row">
+                        <div><span>UP</span><b id="prob-up">--%</b></div>
+                        <div><span>DOWN</span><b id="prob-down">--%</b></div>
+                    </div>
+                    <div class="split-row"><span>Confidence</span><b id="confidence-value">---</b></div>
+                    <p id="prediction-copy" class="context-copy">Model signal loading...</p>
+                </article>
+
+                <article class="metric-card">
+                    <span class="label">Market Pricing</span>
+                    <strong id="market-main">UP -- / DOWN --</strong>
+                    <div class="split-row"><span>UP spread</span><b id="up-spread">---</b></div>
+                    <div class="split-row"><span>DOWN spread</span><b id="down-spread">---</b></div>
+                    <p id="market-copy" class="context-copy">Polymarket quote loading...</p>
+                </article>
+
+                <article class="metric-card">
+                    <span class="label">Edge</span>
+                    <strong id="edge-main">---</strong>
+                    <div class="split-row"><span>UP edge</span><b id="edge-up">---</b></div>
+                    <div class="split-row"><span>DOWN edge</span><b id="edge-down">---</b></div>
+                    <p id="edge-copy" class="context-copy">Edge compares model probability against market price.</p>
+                </article>
             </div>
-        </section>
 
-        <section class="analytics-grid">
-            <article class="analysis-card model-card">
-                <div class="card-header compact">
-                    <h2 class="section-title">MODELO Y DATASET</h2>
-                    <span class="pill" id="model-mode-pill">---</span>
-                </div>
-                <div class="metric-grid">
-                    <div>
-                        <span class="label">FILAS MODELADO</span>
-                        <strong id="perf-modeling-rows">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">RONDAS UNICAS</span>
-                        <strong id="perf-rounds">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">FEATURES</span>
-                        <strong id="perf-features">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">EDGE MIN</span>
-                        <strong id="perf-threshold">---</strong>
-                    </div>
-                </div>
-                <p class="analysis-note" id="model-note">Cargando estado del modelo...</p>
-            </article>
-
-            <article class="analysis-card">
-                <div class="card-header compact">
-                    <h2 class="section-title">CALIDAD PREDICTIVA</h2>
-                    <span class="pill muted">SUPABASE</span>
-                </div>
-                <div class="metric-grid">
-                    <div>
-                        <span class="label">POR FILA</span>
-                        <strong id="perf-row-acc">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">PRIMERA/RONDA</span>
-                        <strong id="perf-first-acc">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">ULTIMA/RONDA</span>
-                        <strong id="perf-last-acc">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">ROC-AUC V1</span>
-                        <strong id="perf-roc">---</strong>
-                    </div>
-                </div>
-                <p class="analysis-note">La metrica por fila se infla porque hay varios snapshots dentro de la misma ronda.</p>
-            </article>
-
-            <article class="analysis-card">
-                <div class="card-header compact">
-                    <h2 class="section-title">ESTRATEGIA SIMULADA</h2>
-                    <span class="pill muted">ASK REAL</span>
-                </div>
-                <div class="metric-grid">
-                    <div>
-                        <span class="label">BETS CERRADAS</span>
-                        <strong id="perf-bets">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">WIN RATE</span>
-                        <strong id="perf-bet-win">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">PNL</span>
-                        <strong id="perf-pnl">---</strong>
-                    </div>
-                    <div>
-                        <span class="label">MODELO NUEVO</span>
-                        <strong id="perf-market-ready">---</strong>
-                    </div>
-                </div>
-                <p class="analysis-note">Esta es la metrica mas cercana a la pregunta: si entro en Polymarket, gano o pierdo?</p>
-            </article>
-        </section>
-
-        <section class="chart-section">
-            <div class="card-header compact">
-                <h2 class="section-title">BTCUSDT / TRADINGVIEW</h2>
-                <div class="chart-source">BINANCE</div>
-            </div>
-            <div class="tradingview-widget-container">
-                <div class="tradingview-widget-container__widget"></div>
-                <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-                {
-                    "autosize": true,
-                    "symbol": "BINANCE:BTCUSDT",
-                    "interval": "1",
-                    "timezone": "America/Lima",
-                    "theme": "dark",
-                    "style": "1",
-                    "locale": "es",
-                    "hide_top_toolbar": false,
-                    "hide_legend": false,
-                    "allow_symbol_change": false,
-                    "calendar": false,
-                    "support_host": "https://www.tradingview.com"
-                }
-                </script>
+            <div class="rule-grid">
+                <article class="rule-card">
+                    <span class="label">Passed Rules</span>
+                    <ul id="passed-rules"></ul>
+                </article>
+                <article class="rule-card">
+                    <span class="label">Failed Rules</span>
+                    <ul id="failed-rules"></ul>
+                </article>
+                <article class="rule-card alignment-card">
+                    <span class="label">Signal Alignment</span>
+                    <div id="alignment-line" class="alignment-line">---</div>
+                    <p>Aligned means the trade follows the model's main prediction.</p>
+                    <p>Contrarian means the strategy is buying the cheap side against the model's main prediction.</p>
+                </article>
             </div>
         </section>
 
-        <!-- Round History Section -->
-        <section class="signals-card">
-            <h2 class="section-title">SENALES SIMULADAS</h2>
-            <div class="table-container">
-                <table id="signals-table">
+        <section class="panel">
+            <div class="section-head compact">
+                <div>
+                    <p class="eyebrow">Performance View</p>
+                    <h2>Choose the data you want to inspect</h2>
+                </div>
+                <div class="toolbar">
+                    <label>Time range</label>
+                    <select id="time-range">
+                        <option value="all">All time</option>
+                        <option value="today">Today</option>
+                        <option value="24h">Last 24h</option>
+                        <option value="12h">Last 12h</option>
+                        <option value="6h">Last 6h</option>
+                        <option value="20r">Last 20 rounds</option>
+                        <option value="10r">Last 10 rounds</option>
+                    </select>
+                </div>
+            </div>
+            <div id="strategy-selector" class="strategy-grid"></div>
+            <div id="custom-strategy" class="custom-strategy"></div>
+        </section>
+
+        <section class="two-col">
+            <article class="panel">
+                <div class="section-head compact">
+                    <div>
+                    <p class="eyebrow">Strategy Lab</p>
+                    <h2 id="strategy-source-title">Strategy Lab by decision logic</h2>
+                    </div>
+                </div>
+                <p id="strategy-source-copy" class="context-copy">Loading source...</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Strategy</th>
+                                <th>Signals</th>
+                                <th>Win Rate</th>
+                                <th>Gross Won</th>
+                                <th>Gross Lost</th>
+                                <th>Net PnL</th>
+                                <th>Avg ROI</th>
+                                <th>Best Bucket</th>
+                                <th>Recent Net</th>
+                                <th>Alignment</th>
+                            </tr>
+                        </thead>
+                        <tbody id="strategy-performance-body"></tbody>
+                    </table>
+                </div>
+            </article>
+
+            <article class="panel">
+                <div class="section-head compact">
+                    <div>
+                    <p class="eyebrow">Recent Performance / Drift</p>
+                    <h2 id="drift-source-title">Live active model drift</h2>
+                    </div>
+                    <span id="drift-badge" class="badge">---</span>
+                </div>
+                <div class="summary-grid">
+                    <div><span>All-time PnL</span><strong id="drift-all-pnl">---</strong></div>
+                    <div><span>Recent PnL</span><strong id="drift-recent-pnl">---</strong></div>
+                    <div><span>Recent signals</span><strong id="drift-signals">---</strong></div>
+                    <div><span>Recent accuracy</span><strong id="drift-accuracy">---</strong></div>
+                </div>
+                <p id="drift-copy" class="context-copy">Recent status loading...</p>
+                <div class="mini-bars" id="recent-pnl-trend"></div>
+            </article>
+        </section>
+
+        <section class="panel">
+            <div class="section-head compact">
+                <div>
+                    <p class="eyebrow">Model Performance</p>
+                    <h2>Test performance vs post-production live</h2>
+                </div>
+            </div>
+            <div class="model-summary">
+                <article class="metric-card">
+                    <span class="label">Model Test Performance</span>
+                    <strong id="model-summary-title">---</strong>
+                    <div class="split-row"><span>Training data</span><b id="model-total-preds">---</b></div>
+                    <div class="split-row"><span>Test accuracy</span><b id="model-accuracy">---</b></div>
+                    <p id="model-copy" class="context-copy">The model can be accurate while the strategy loses money.</p>
+                </article>
+                <article class="metric-card">
+                    <span class="label">Post-production Forecasts</span>
+                    <strong id="live-forecast-title">---</strong>
+                    <div class="split-row"><span>Resolved forecasts</span><b id="model-live-resolved">---</b></div>
+                    <div class="split-row"><span>Recent accuracy</span><b id="model-recent-accuracy">---</b></div>
+                    <div class="split-row"><span>BUY signals</span><b id="live-buy-signals">---</b></div>
+                    <p id="live-forecast-copy" class="context-copy">Live forecast status loading...</p>
+                </article>
+                <article class="metric-card">
+                    <span class="label">Post-production Edge Signals</span>
+                    <strong id="live-blocker-title">---</strong>
+                    <div class="split-row"><span>WAIT decisions</span><b id="live-wait-decisions">---</b></div>
+                    <div class="split-row"><span>Baseline exact</span><b id="live-baseline-exact">---</b></div>
+                    <div class="split-row"><span>Closed live PnL</span><b id="live-paper-pnl">---</b></div>
+                    <p id="live-blocker-copy" class="context-copy">Live blocker status loading...</p>
+                </article>
+            </div>
+            <div class="table-wrap">
+                <table>
                     <thead>
                         <tr>
-                            <th>HORA</th>
-                            <th>FALTABAN</th>
-                            <th>LADO</th>
-                            <th>ENTRADA</th>
-                            <th>PROB</th>
-                            <th>EDGE</th>
-                            <th>RESULTADO</th>
-                            <th>PNL</th>
+                            <th>Bucket</th>
+                            <th>Predictions</th>
+                            <th>Correct</th>
+                            <th>Accuracy</th>
+                            <th>Avg Confidence</th>
+                            <th>Avg Edge</th>
+                            <th>Assessment</th>
                         </tr>
                     </thead>
-                    <tbody id="signals-body">
-                        <!-- Filled by JS -->
-                    </tbody>
+                    <tbody id="model-bucket-body"></tbody>
                 </table>
             </div>
         </section>
 
-        <section class="history-card">
-            <h2 class="section-title">HISTORIAL DE PARTIDAS (5 MIN)</h2>
-            <div class="table-container">
-                <table id="rounds-table">
+        <section class="panel">
+            <div class="section-head compact">
+                <div>
+                    <p class="eyebrow">Timeframe / Bucket Performance</p>
+                    <h2 id="bucket-source-title">Strategy Lab: replayed trading performance</h2>
+                </div>
+            </div>
+            <p id="bucket-source-copy" class="context-copy">Loading source...</p>
+            <div class="bucket-summary">
+                <div><span>Best trading bucket</span><strong id="best-trading-bucket">---</strong></div>
+                <div><span>Best prediction bucket</span><strong id="best-prediction-bucket">---</strong></div>
+                <div><span>Operating zone</span><strong id="operating-zone">---</strong></div>
+                <div><span>Worst zone</span><strong id="worst-zone">---</strong></div>
+            </div>
+            <div class="chart-grid">
+                <article>
+                    <h3>PnL by Bucket</h3>
+                    <div id="pnl-by-bucket" class="bar-chart"></div>
+                </article>
+                <article>
+                    <h3>Accuracy by Bucket</h3>
+                    <div id="accuracy-by-bucket" class="bar-chart"></div>
+                </article>
+                <article>
+                    <h3>Alignment PnL</h3>
+                    <div id="alignment-pnl" class="bar-chart"></div>
+                </article>
+            </div>
+            <div class="table-wrap">
+                <table>
                     <thead>
                         <tr>
-                            <th>CORTE</th>
-                            <th>BASELINE</th>
-                            <th>PREDICCIÓN</th>
-                            <th>CIERRE</th>
-                            <th>OUTCOME</th>
-                            <th>ACIERTO</th>
+                            <th>Bucket</th>
+                            <th>Predictions</th>
+                            <th>Accuracy</th>
+                            <th>Signals</th>
+                            <th>Win Rate</th>
+                            <th>Total PnL</th>
+                            <th>Avg ROI</th>
+                            <th>Avg Entry</th>
+                            <th>Aligned %</th>
+                            <th>Recommendation</th>
                         </tr>
                     </thead>
-                    <tbody id="rounds-body">
-                        <!-- Filled by JS -->
-                    </tbody>
+                    <tbody id="bucket-performance-body"></tbody>
                 </table>
             </div>
         </section>
 
-        <section class="analysis-card guide-card">
-            <div class="card-header compact">
-                <h2 class="section-title">MANUAL RAPIDO DE USO</h2>
-                <span class="pill muted">DECISION</span>
+        <section class="panel">
+            <div class="section-head compact">
+                <div>
+                    <p class="eyebrow">Signal History</p>
+                    <h2 id="signals-source-title">Live active model signals</h2>
+                </div>
+                <div class="toolbar">
+                    <select id="signal-limit">
+                        <option value="25">Last 25</option>
+                        <option value="50">Last 50</option>
+                        <option value="100">Last 100</option>
+                    </select>
+                    <select id="filter-alignment">
+                        <option value="all">All alignment</option>
+                        <option value="ALIGNED">Only aligned</option>
+                        <option value="CONTRARIAN">Only contrarian</option>
+                    </select>
+                    <select id="filter-result">
+                        <option value="all">All results</option>
+                        <option value="WIN">Only wins</option>
+                        <option value="LOSS">Only losses</option>
+                        <option value="OPEN">Open</option>
+                        <option value="CLOSING">Closing</option>
+                        <option value="PROVISIONAL">Provisional</option>
+                        <option value="RESOLVING">Resolving</option>
+                    </select>
+                    <button id="refresh-signals" class="toolbar-button" type="button">Refresh</button>
+                    <span class="badge" id="signals-showing">---</span>
+                </div>
             </div>
-            <div class="guide-grid">
+            <div class="signal-summary">
+                <div><span>Signal Accuracy</span><strong id="signal-summary-accuracy">---</strong></div>
+                <div><span>Signal PnL</span><strong id="signal-summary-pnl">---</strong></div>
+                <div><span>Stake Spent</span><strong id="signal-summary-stake">---</strong></div>
+                <div><span id="signal-summary-last-label">Since Last Signal</span><strong id="signal-summary-last">---</strong></div>
+                <div><span id="signal-summary-avg-label">Avg Signal Interval</span><strong id="signal-summary-avg-gap">---</strong></div>
+                <div><span>Total Signals</span><strong id="signal-summary-count">---</strong></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Cutoff</th>
+                            <th>Bucket</th>
+                            <th>Prediction</th>
+                            <th>Action</th>
+                            <th>Alignment</th>
+                            <th>Entry</th>
+                            <th>Stake</th>
+                            <th>Model Prob</th>
+                            <th>Edge</th>
+                            <th>Result</th>
+                            <th>PnL</th>
+                            <th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signals-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="section-head compact">
                 <div>
-                    <strong>1. Baseline</strong>
-                    <p>Compara el baseline de la web con Polymarket. Si no coincide, usa SYNC antes de confiar en la ronda.</p>
+                    <p class="eyebrow">Round History</p>
+                    <h2 id="round-source-title">Active model live forecast vs final forecast</h2>
                 </div>
+            </div>
+            <div class="round-summary">
+                <div><span id="round-initial-label">Initial 15m accuracy</span><strong id="round-initial-accuracy">---</strong></div>
+                <div><span id="round-initial-pnl-label">Initial Prediction PnL</span><strong id="round-initial-pnl">---</strong></div>
+                <div><span id="round-final-label">All timeframe accuracy</span><strong id="round-final-accuracy">---</strong></div>
+                <div><span id="round-signal-accuracy-label">Selected Signal Accuracy</span><strong id="round-signal-accuracy">---</strong></div>
+                <div><span id="round-resolved-label">Resolved rounds</span><strong id="round-resolved-count">---</strong></div>
+                <div><span id="round-trade-pnl-label">Selected PnL</span><strong id="round-trade-pnl">---</strong></div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Cutoff</th>
+                            <th>Baseline</th>
+                            <th>Initial Prediction</th>
+                            <th>Actual Close</th>
+                            <th>Outcome</th>
+                            <th>Initial Correct?</th>
+                            <th id="round-signals-th">Source/Strategy Signals</th>
+                            <th id="round-pnl-th">Source/Strategy PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rounds-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel readme-panel">
+            <div class="section-head compact">
                 <div>
-                    <strong>2. Accion</strong>
-                    <p>Solo considera entrada cuando diga BUY UP o BUY DOWN. WAIT significa que el precio no paga suficiente edge.</p>
+                    <p class="eyebrow">How to read this dashboard</p>
+                    <h2>Operational definitions</h2>
                 </div>
-                <div>
-                    <strong>3. Edge</strong>
-                    <p>Edge positivo mayor a 7% indica que el modelo ve valor contra el ask actual. No es garantia; es filtro.</p>
-                </div>
-                <div>
-                    <strong>4. Timing</strong>
-                    <p>Las metricas por segundos restantes te dicen en que tramo el sistema ha funcionado mejor o peor.</p>
-                </div>
+            </div>
+            <div class="readme-grid">
+                <p><b>Prediction</b> is what the model thinks will win.</p>
+                <p><b>Market price</b> is Polymarket's implied probability.</p>
+                <p><b>Edge</b> is model probability minus market price.</p>
+                <p><b>Signal</b> is the simulated trade selected by the strategy.</p>
+                <p><b>Alignment</b> shows whether the signal follows or goes against the model prediction.</p>
+                <p><b>Trade result</b> shows whether the simulated signal made money.</p>
+                <p><b>High prediction accuracy</b> does not always mean profitable trades.</p>
+                <p><b>Bucket warning</b>: a bucket can have high accuracy but poor trading if the strategy buys contrarian longshots or enters too late.</p>
             </div>
         </section>
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=20260531-provisional-close"></script>
 </body>
 </html>
