@@ -24,8 +24,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import db
+from features import FEATURE_COLUMNS
 
 load_dotenv()
+
+# Only these technical features are valid model inputs. Anything else found in the
+# stored feature JSON (model outputs like prob_up/edge/confidence, poly_* quotes,
+# or feat__-duplicated keys from old collector versions) is leakage and is dropped.
+ALLOWED_TECH_FEATURES = set(FEATURE_COLUMNS)
+
+
+def _strip_feat_prefix(key):
+    while key.startswith("feat__"):
+        key = key[len("feat__"):]
+    return key
 
 
 QUOTE_COLUMNS = [
@@ -63,16 +75,31 @@ def flatten_features(frame):
     feature_rows = []
     for item in frame.get("features", []):
         if isinstance(item, dict):
-            feature_rows.append(item)
+            raw = item
         elif isinstance(item, str):
             try:
-                parsed = json.loads(item)
+                raw = json.loads(item)
             except json.JSONDecodeError:
-                parsed = {}
-            feature_rows.append(parsed if isinstance(parsed, dict) else {})
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
         else:
-            feature_rows.append({})
-    features = pd.json_normalize(feature_rows).add_prefix("feat__")
+            raw = {}
+        # Sanitize: collapse repeated feat__ prefixes and keep ONLY whitelisted
+        # technical features. Drops leaked model outputs (prob_up/edge/confidence),
+        # poly_* quote dupes, and context dupes that must not be model inputs.
+        clean = {}
+        for key, value in raw.items():
+            base_name = _strip_feat_prefix(key)
+            if base_name in ALLOWED_TECH_FEATURES:
+                clean[f"feat__{base_name}"] = value
+        feature_rows.append(clean)
+    features = pd.DataFrame(feature_rows)
+    # Guarantee a stable, complete technical column set (missing -> NaN -> imputed).
+    for col in (f"feat__{name}" for name in FEATURE_COLUMNS):
+        if col not in features.columns:
+            features[col] = np.nan
+    features = features[[f"feat__{name}" for name in FEATURE_COLUMNS]]
     base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
     matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")

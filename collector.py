@@ -708,7 +708,10 @@ def collect_once_v2(model=None, market=None):
             }
         )
 
-    features = pred.get("feature_values") or pred.get("features") or base_pred.get("features", {})
+    # Store ONLY the raw technical indicators (clean inputs). Storing the market
+    # model's full feature_values would re-inject context/quotes/model-outputs and
+    # cause feat__ duplication + leakage in training. See train_model_v2.flatten_features.
+    features = base_pred.get("features", {})
     db.upsert_feature_snapshot(
         {
             "snapshot_id": snapshot_id,
