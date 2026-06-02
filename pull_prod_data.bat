@@ -30,7 +30,8 @@ echo Esperando a que SQL Server local este listo...
 timeout /t 20 /nobreak 1>nul
 
 echo [6/6] Restaurando en SQL Server local...
-docker compose run --rm --no-deps app sqlcmd -S sqlserver,1433 -U sa -P "PolymarketBot_2026!" -C -i /app/restore_prod.sql
+for /f "tokens=1,* delims==" %%a in ('findstr /b "MSSQL_SA_PASSWORD=" .env') do set LOCALPW=%%b
+docker compose run --rm --no-deps app sqlcmd -S sqlserver,1433 -U sa -P "%LOCALPW%" -C -i /app/restore_prod.sql
 if errorlevel 1 goto :err
 
 echo.
