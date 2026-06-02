@@ -76,8 +76,10 @@ def main():
     start = max(200, int(len(rounds) * 0.45))
     step = 40
     agg = {k: [] for k in STRATS}  # list of (entry, won)
+    fold_net = {k: [] for k in STRATS}  # per-fold net pnl
     i = start
     while i < len(rounds):
+        fold_legs = {k: [] for k in STRATS}
         tr = frame[frame["round_cutoff"].isin(set(rounds[:i]))]
         te = frame[frame["round_cutoff"].isin(set(rounds[i:i + step]))]
         if te.empty:
@@ -103,9 +105,14 @@ def main():
                 d = decide(s, p[j], ua[j], us[j], da[j], ds[j], int(bk[j]) if not np.isnan(bk[j]) else -1)
                 if d:
                     side, entry = d
-                    agg[name].append((entry, side == oc[j]))
+                    leg = (entry, side == oc[j])
+                    agg[name].append(leg)
+                    fold_legs[name].append(leg)
+        for name in STRATS:
+            fl = fold_legs[name]
+            fold_net[name].append(sum((1 / e - 1) if w else -1 for e, w in fl) if fl else 0.0)
         i += step
-    print(f"{'strategy':>20} {'signals':>8} {'win%':>6} {'avgEnt':>7} {'net':>9} {'roi':>8}")
+    print(f"{'strategy':>20} {'signals':>8} {'win%':>6} {'avgEnt':>7} {'net':>9} {'roi':>8} {'folds+':>8}")
     for name, legs in agg.items():
         if not legs:
             print(f"{name:>20} {0:>8}")
@@ -114,8 +121,10 @@ def main():
         wr = np.mean([1 if w else 0 for _, w in legs])
         ae = np.mean([e for e, _ in legs])
         roi = net / len(legs)
+        fnets = fold_net[name]
+        pos = sum(1 for x in fnets if x > 0)
         flag = "  <== +EV" if net > 0 else ""
-        print(f"{name:>20} {len(legs):>8} {wr*100:>5.1f} {ae:>7.3f} {net:>+9.2f} {roi*100:>+7.1f}%{flag}")
+        print(f"{name:>20} {len(legs):>8} {wr*100:>5.1f} {ae:>7.3f} {net:>+9.2f} {roi*100:>+7.1f}% {pos:>3}/{len(fnets):<3}{flag}")
 
 
 if __name__ == "__main__":
