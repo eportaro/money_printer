@@ -57,17 +57,36 @@ def main():
     p = nan(); p[roc > 0] = 1; p[roc < 0] = 0; rules["ROC(10) sign (momentum)"] = p
     p = nan(); p[ret5 > 0] = 1; p[ret5 < 0] = 0; rules["Return(5) sign (momentum)"] = p
 
+    ua = pd.to_numeric(frame.get("up_best_ask"), errors="coerce").to_numpy()
+    da = pd.to_numeric(frame.get("down_best_ask"), errors="coerce").to_numpy()
+
+    def trade_pnl(pred):
+        # bet the predicted side at its market ask, EARLY buckets only
+        net = 0.0
+        n = 0
+        for i in range(len(pred)):
+            if np.isnan(pred[i]) or not early[i]:
+                continue
+            ask = ua[i] if pred[i] == 1 else da[i]
+            if np.isnan(ask) or ask <= 0:
+                continue
+            won = pred[i] == y[i]
+            net += (1.0 / ask - 1.0) if won else -1.0
+            n += 1
+        return net, n
+
     print(f"rows total={len(y)}  early (T>=480)={int(early.sum())}  base UP rate={y.mean():.3f}\n")
-    print(f"{'TA rule':>34} {'fires':>6} {'acc(all)':>9} {'fires_e':>8} {'acc(early)':>10}")
+    print(f"{'TA rule':>34} {'acc(early)':>10} {'bets':>6} {'net':>9} {'roi':>8}")
     for name, pred in rules.items():
-        a_all, n_all = acc(pred, y)
         pe = pred.copy(); pe[~early] = np.nan
         a_e, n_e = acc(pe, y)
-        sa = f"{a_all:.3f}" if a_all is not None else "--"
+        net, nb = trade_pnl(pred)
+        roi = net / nb if nb else 0.0
         se = f"{a_e:.3f}" if a_e is not None else "--"
-        flag = "  <== >0.53" if (a_e is not None and a_e > 0.53 and n_e > 100) else ""
-        print(f"{name:>34} {n_all:>6} {sa:>9} {n_e:>8} {se:>10}{flag}")
-    print("\n(coin flip = 0.500. A real TA edge needs early acc clearly >0.53 on a decent sample.)")
+        flag = "  <== +EV" if net > 0 else ""
+        print(f"{name:>34} {se:>10} {nb:>6} {net:>+9.2f} {roi*100:>+7.1f}%{flag}")
+    print("\nacc>0.50 NO basta: si compras al ask del mercado (que ya refleja el movimiento),")
+    print("el ROI es lo que importa. +EV solo si net>0 tras pagar el precio.")
 
 
 if __name__ == "__main__":
