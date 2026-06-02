@@ -91,6 +91,20 @@ const STRATEGIES = {
         minAskSize: 50,
         badge: 'ALIGNED'
     },
+    favorite: {
+        name: 'Favorito (anti-longshot)',
+        description: 'Compra el lado FAVORITO del mercado (prob alta, 88-96c). Explota el sesgo favorito-longshot medido en la data: los longshots estan sobrevalorados y el favorito esta levemente barato. Edge chico pero el unico robusto.',
+        allowedBuckets: BUCKETS.slice(),
+        mode: 'favorite',
+        minProb: 0.00,
+        minEdge: -1.00,
+        allowContrarian: true,
+        minEntry: 0.88,
+        maxEntry: 0.96,
+        excludeBelow: 0,
+        minAskSize: 0,
+        badge: 'FAVORITE'
+    },
     custom: {
         name: 'Custom Strategy',
         description: 'Ajusta buckets, probabilidad, edge, contrarian y precio maximo.',
@@ -530,6 +544,30 @@ function replayDecision(row, strategy) {
     const downAskSize = nullableNum(row.down_ask_size);
     const prediction = row.prediction;
     const minAskSize = strategy.minAskSize || 0;
+    if (strategy.mode === 'favorite') {
+        const favs = [];
+        if (upAsk !== null) favs.push({ side: 'UP', model_prob: probUp, entry_price: upAsk, edge: probUp - upAsk, ask_size: upAskSize });
+        if (downAsk !== null) favs.push({ side: 'DOWN', model_prob: probDown, entry_price: downAsk, edge: probDown - downAsk, ask_size: downAskSize });
+        favs.sort((a, b) => b.entry_price - a.entry_price); // favorite = highest market ask
+        const fav = favs[0];
+        if (!fav) return null;
+        const bucket = Number(row.seconds_bucket);
+        const minEntry = strategy.minEntry ?? 0.85;
+        if (!bucketAllowedByGlobalLastAlert(bucket)) return null;
+        if (!strategy.allowedBuckets.includes(bucket)) return null;
+        if (bucket <= strategy.excludeBelow) return null;
+        if (fav.entry_price < minEntry || fav.entry_price > strategy.maxEntry) return null;
+        if (minAskSize > 0 && (fav.ask_size === null || fav.ask_size < minAskSize)) return null;
+        return {
+            action: fav.side === 'UP' ? 'BUY_UP' : 'BUY_DOWN',
+            side: fav.side,
+            model_prob: fav.model_prob,
+            entry_price: fav.entry_price,
+            edge: fav.edge,
+            ask_size: fav.ask_size,
+            reason: `${strategy.name}, T-${bucket}, fav ${pct(fav.entry_price)}`
+        };
+    }
     if (strategy.allowContrarian || prediction === 'UP') {
         if (upAsk !== null) candidates.push({ side: 'UP', model_prob: probUp, entry_price: upAsk, edge: probUp - upAsk, ask_size: upAskSize });
     }
