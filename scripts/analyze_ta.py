@@ -60,10 +60,9 @@ def main():
     ua = pd.to_numeric(frame.get("up_best_ask"), errors="coerce").to_numpy()
     da = pd.to_numeric(frame.get("down_best_ask"), errors="coerce").to_numpy()
 
-    def trade_pnl(pred):
-        # bet the predicted side at its market ask, EARLY buckets only
-        net = 0.0
-        n = 0
+    def trade_pnls(pred):
+        # bet predicted side at its ask, EARLY only; return pnls in time order
+        out = []
         for i in range(len(pred)):
             if np.isnan(pred[i]) or not early[i]:
                 continue
@@ -71,20 +70,23 @@ def main():
             if np.isnan(ask) or ask <= 0:
                 continue
             won = pred[i] == y[i]
-            net += (1.0 / ask - 1.0) if won else -1.0
-            n += 1
-        return net, n
+            out.append((1.0 / ask - 1.0) if won else -1.0)
+        return out
 
     print(f"rows total={len(y)}  early (T>=480)={int(early.sum())}  base UP rate={y.mean():.3f}\n")
-    print(f"{'TA rule':>34} {'acc(early)':>10} {'bets':>6} {'net':>9} {'roi':>8}")
+    print(f"{'TA rule':>34} {'acc(early)':>10} {'bets':>6} {'net':>9} {'roi':>8} {'win+':>7}")
     for name, pred in rules.items():
         pe = pred.copy(); pe[~early] = np.nan
         a_e, n_e = acc(pe, y)
-        net, nb = trade_pnl(pred)
-        roi = net / nb if nb else 0.0
+        pn = trade_pnls(pred)
+        net = sum(pn); nb = len(pn); roi = net / nb if nb else 0.0
+        # 6 equal time windows -> how many are net-positive (consistency)
+        W = 6
+        chunks = np.array_split(np.array(pn), W) if nb >= W else [np.array(pn)]
+        winpos = sum(1 for c in chunks if c.sum() > 0)
         se = f"{a_e:.3f}" if a_e is not None else "--"
         flag = "  <== +EV" if net > 0 else ""
-        print(f"{name:>34} {se:>10} {nb:>6} {net:>+9.2f} {roi*100:>+7.1f}%{flag}")
+        print(f"{name:>34} {se:>10} {nb:>6} {net:>+9.2f} {roi*100:>+7.1f}% {winpos:>2}/{len(chunks):<2}{flag}")
     print("\nacc>0.50 NO basta: si compras al ask del mercado (que ya refleja el movimiento),")
     print("el ROI es lo que importa. +EV solo si net>0 tras pagar el precio.")
 
