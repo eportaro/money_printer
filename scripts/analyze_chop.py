@@ -112,7 +112,10 @@ def main():
         model = Pipeline([("imp", SimpleImputer(strategy="median")),
                           ("m", HistGradientBoostingClassifier(learning_rate=0.05, max_iter=150, max_leaf_nodes=15, random_state=42))])
         model.fit(Xtr, ytr)
-        pick = model.predict(Xte).astype(bool)
+        proba = model.predict_proba(Xte)[:, 1]
+        k = max(1, int(0.20 * len(Xte)))  # take the top-20% predicted-choppiest
+        pick = np.zeros(len(Xte), dtype=bool)
+        pick[np.argsort(-proba)[:k]] = True
         picked_pnl = seg_pnl[pick]
         sel_pnls.extend(picked_pnl.tolist())
         sel_count += int(pick.sum())
