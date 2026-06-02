@@ -7,7 +7,9 @@ services:
       MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}"
       MSSQL_MEMORY_LIMIT_MB: "${MSSQL_MEMORY_LIMIT_MB:-3072}"
     ports:
-      - "14333:1433"
+      # Bound to localhost only; reach it from your PC via an SSH tunnel:
+      #   ssh -i <key> -L 14333:127.0.0.1:14333 root@<vps>   then connect to localhost:14333
+      - "127.0.0.1:14333:1433"
     volumes:
       - mssql-data:/var/opt/mssql
     restart: unless-stopped
