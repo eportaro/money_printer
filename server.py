@@ -238,19 +238,37 @@ def _enrich_forecasts(predictions, active_version):
 
 
 def _flatten_training_features(frame):
+    # Must match scripts/train_model_v2.flatten_features exactly: keep ONLY whitelisted
+    # technical features (collapsing repeated feat__ prefixes), dropping leaked model
+    # outputs / poly_* dupes. Otherwise the test-split eval feeds the model different
+    # features than it was trained on and the metrics are bogus.
+    allowed = set(FEATURE_COLUMNS)
     feature_rows = []
     for item in frame.get("features", []):
         if isinstance(item, dict):
-            feature_rows.append(item)
+            raw = item
         elif isinstance(item, str):
             try:
-                parsed = json.loads(item)
+                raw = json.loads(item)
             except Exception:
-                parsed = {}
-            feature_rows.append(parsed if isinstance(parsed, dict) else {})
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
         else:
-            feature_rows.append({})
-    features = pd.json_normalize(feature_rows).add_prefix("feat__")
+            raw = {}
+        clean = {}
+        for key, value in raw.items():
+            base_name = key
+            while base_name.startswith("feat__"):
+                base_name = base_name[len("feat__"):]
+            if base_name in allowed:
+                clean[f"feat__{base_name}"] = value
+        feature_rows.append(clean)
+    features = pd.DataFrame(feature_rows)
+    for col in (f"feat__{name}" for name in FEATURE_COLUMNS):
+        if col not in features.columns:
+            features[col] = np.nan
+    features = features[[f"feat__{name}" for name in FEATURE_COLUMNS]]
     base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
     matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")
