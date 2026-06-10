@@ -9,6 +9,7 @@ single test-split result was regime/overfit.
 
 Uses HistGradientBoosting (fast, reasonably calibrated) on the SAME clean features.
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import db
 from train_model_v2 import flatten_features
+from strategy_walkforward import FEE_RATE, leg_pnl
 
 
 def build_model():
@@ -60,12 +62,17 @@ def edge_legs(te, probs, threshold=0.03):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fee-rate", type=float, default=FEE_RATE,
+                        help="crypto_fees_v2 taker rate (0 = ignore fees, old behavior)")
+    args = parser.parse_args()
+    fee_rate = args.fee_rate
     frame = pd.DataFrame(db.fetch_training_decision_snapshots(50000))
     frame = frame[frame["target_up"].notna()].copy()
     rounds = sorted(frame["round_cutoff"].unique())
     start = max(250, int(len(rounds) * 0.45))
     step = 30
-    print(f"total rounds={len(rounds)}  initial train={start}  step={step} rounds/fold\n")
+    print(f"total rounds={len(rounds)}  initial train={start}  step={step} rounds/fold  fee_rate={fee_rate}\n")
     print(f"{'fold':>4} {'trainR':>7} {'testR':>6} {'sigs':>5} {'win%':>6} {'avgEnt':>7} {'net':>9} {'roi':>7} {'initAUC':>8}")
     agg = []
     fold = 0
@@ -84,7 +91,7 @@ def main():
         p = model.predict_proba(Xte)[:, 1]
         legs = edge_legs(te, p)
         if legs:
-            net = sum((1.0 / e - 1.0) if w else -1.0 for e, w in legs)
+            net = sum(leg_pnl(e, w, fee_rate) for e, w in legs)
             wr = np.mean([1.0 if w else 0.0 for _, w in legs])
             ae = np.mean([e for e, _ in legs])
             roi = net / len(legs)
