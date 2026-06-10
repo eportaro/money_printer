@@ -4,6 +4,7 @@ ones), out-of-sample. Each fold: train model on past rounds, predict test rounds
 each strategy's exact decision rule, accumulate PnL. Gives the honest per-strategy number
 (not the lucky single test split) and tells whether ANY rule/combination is +EV.
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -20,6 +21,16 @@ import db
 from train_model_v2 import flatten_features
 
 ALL_BUCKETS = {895, 840, 720, 600, 480, 360, 240, 180, 120, 90, 60, 30, 15, 5}
+
+# Polymarket crypto_fees_v2 (these BTC 15m markets): taker-only, charged at trade
+# time as rate * min(price, 1-price) per share. Buying $1 of stake at ask `e`
+# buys 1/e shares -> fee = rate * min(e, 1-e) / e dollars.
+FEE_RATE = 0.07
+
+
+def leg_pnl(entry, won, fee_rate):
+    fee = fee_rate * min(entry, 1.0 - entry) / entry if entry > 0 else 0.0
+    return ((1.0 / entry - 1.0) if won else -1.0) - fee
 
 STRATS = {
     "dir_conservative":  dict(buckets={480, 360, 240}, minProb=0.55, minEdge=0.05, maxEntry=0.95, contrarian=False, excludeBelow=120, minSize=0),
@@ -70,6 +81,11 @@ def decide(s, prob_up, up_ask, up_sz, dn_ask, dn_sz, bucket):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fee-rate", type=float, default=FEE_RATE,
+                        help="crypto_fees_v2 taker rate (0 = ignore fees, old behavior)")
+    args = parser.parse_args()
+    fee_rate = args.fee_rate
     frame = pd.DataFrame(db.fetch_training_decision_snapshots(50000))
     frame = frame[frame["target_up"].notna()].copy()
     rounds = sorted(frame["round_cutoff"].unique())
@@ -110,14 +126,15 @@ def main():
                     fold_legs[name].append(leg)
         for name in STRATS:
             fl = fold_legs[name]
-            fold_net[name].append(sum((1 / e - 1) if w else -1 for e, w in fl) if fl else 0.0)
+            fold_net[name].append(sum(leg_pnl(e, w, fee_rate) for e, w in fl) if fl else 0.0)
         i += step
+    print(f"fee_rate={fee_rate} (crypto_fees_v2 taker)")
     print(f"{'strategy':>20} {'signals':>8} {'win%':>6} {'avgEnt':>7} {'net':>9} {'roi':>8} {'folds+':>8}")
     for name, legs in agg.items():
         if not legs:
             print(f"{name:>20} {0:>8}")
             continue
-        net = sum((1 / e - 1) if w else -1 for e, w in legs)
+        net = sum(leg_pnl(e, w, fee_rate) for e, w in legs)
         wr = np.mean([1 if w else 0 for _, w in legs])
         ae = np.mean([e for e, _ in legs])
         roi = net / len(legs)

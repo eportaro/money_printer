@@ -43,7 +43,6 @@ MAX_HISTORY = 200
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.03"))
 ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", "market-aware-v1")
 MODEL_STAGE = os.getenv("MODEL_STAGE", "production")
-PERSIST_FROM_SERVER = os.getenv("PERSIST_FROM_SERVER", "false").lower() == "true"
 PERFORMANCE_CACHE_SECONDS = int(os.getenv("PERFORMANCE_CACHE_SECONDS", "60"))
 POLYMARKET_MARKET_REFRESH_SECONDS = int(os.getenv("POLYMARKET_MARKET_REFRESH_SECONDS", "30"))
 BASELINE_MAX_FEED_DELTA_ABS = float(os.getenv("BASELINE_MAX_FEED_DELTA_ABS", "75"))
@@ -137,8 +136,6 @@ def get_active_poly_market(window_start=None):
     try:
         active_poly_market = discover_btc_market(window_start=current_start)
         active_poly_market_fetched_at = time.time()
-        if PERSIST_FROM_SERVER:
-            db.upsert_market(active_poly_market)
         print(f"Polymarket market detected: {active_poly_market.get('question')}")
     except Exception as e:
         print(f"Polymarket market discovery failed: {e}")
@@ -242,7 +239,10 @@ def _flatten_training_features(frame):
     # technical features (collapsing repeated feat__ prefixes), dropping leaked model
     # outputs / poly_* dupes. Otherwise the test-split eval feeds the model different
     # features than it was trained on and the metrics are bogus.
-    allowed = set(FEATURE_COLUMNS)
+    from microstructure import MICRO_FEATURE_COLUMNS
+
+    tech_columns = list(FEATURE_COLUMNS) + list(MICRO_FEATURE_COLUMNS)
+    allowed = set(tech_columns)
     feature_rows = []
     for item in frame.get("features", []):
         if isinstance(item, dict):
@@ -265,10 +265,10 @@ def _flatten_training_features(frame):
                 clean[f"feat__{base_name}"] = value
         feature_rows.append(clean)
     features = pd.DataFrame(feature_rows)
-    for col in (f"feat__{name}" for name in FEATURE_COLUMNS):
+    for col in (f"feat__{name}" for name in tech_columns):
         if col not in features.columns:
             features[col] = np.nan
-    features = features[[f"feat__{name}" for name in FEATURE_COLUMNS]]
+    features = features[[f"feat__{name}" for name in tech_columns]]
     base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
     matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")
@@ -348,86 +348,6 @@ def _model_test_predictions(limit=50000):
     return sorted(output, key=lambda item: str(item.get("observed_at") or ""), reverse=True)
 
 
-def persist_live_prediction(df, df_feat, payload, quotes=None, market=None):
-    """Best-effort edge enrichment and persistence. Keeps JSON fallback untouched."""
-    payload.setdefault("edge_up", None)
-    payload.setdefault("edge_down", None)
-    payload.setdefault("recommended_action", "WAIT")
-    payload.setdefault("db_snapshot_id", None)
-    payload.setdefault("db_prediction_id", None)
-
-    if not PERSIST_FROM_SERVER:
-        return
-
-    try:
-        next_cutoff = payload["next_cutoff"]
-        window_start = next_cutoff - WINDOW_SECONDS
-        current_price = payload["current_price"]
-        baseline = payload["window_open"]
-        dist = current_price - baseline
-        snapshot_id = db.insert_round_snapshot({
-            "observed_at": datetime.now(timezone.utc),
-            "round_cutoff": next_cutoff,
-            "window_start": window_start,
-            "seconds_to_cutoff": max(0, next_cutoff - int(time.time())),
-            "symbol": SYMBOL,
-            "btc_price": current_price,
-            "baseline": baseline,
-            "dist_to_baseline": dist,
-            "dist_to_baseline_pct": (dist / baseline * 100) if baseline else None,
-            "source": PRICE_SOURCE_LABEL,
-            "raw": {"latest_candle": df.iloc[-1].to_dict()},
-        })
-
-        market = market or get_active_poly_market(window_start)
-        quotes = quotes or []
-        if quotes:
-            for quote in quotes:
-                db.insert_quote(quote)
-        elif market and fetch_market_quotes is not None:
-            try:
-                quotes = fetch_market_quotes(market, round_cutoff=next_cutoff)
-                for quote in quotes:
-                    db.insert_quote(quote)
-            except Exception as e:
-                print(f"Polymarket quote persistence failed: {e}")
-
-        prob_up = payload["prob_up"]
-        edge = edge_from_probabilities(prob_up, quotes, EDGE_THRESHOLD)
-        edge_up = edge["edge_up"]
-        edge_down = edge["edge_down"]
-        action = edge["recommended_action"]
-        up_ask = edge["up_ask"]
-        down_ask = edge["down_ask"]
-
-        features = payload.get("feature_values") or df_feat[FEATURE_COLUMNS].iloc[-1:].fillna(0).iloc[0].to_dict()
-        prediction_id = db.insert_prediction({
-            "observed_at": datetime.now(timezone.utc),
-            "round_cutoff": next_cutoff,
-            "model_version": payload.get("model_version", ACTIVE_MODEL),
-            "prediction": payload["prediction"],
-            "prob_up": prob_up,
-            "prob_down": payload.get("prob_down", 1.0 - prob_up),
-            "confidence": payload["confidence"],
-            "edge_up": edge_up,
-            "edge_down": edge_down,
-            "recommended_action": action,
-            "feature_values": features,
-            "source_snapshot_id": snapshot_id,
-            "raw": {"payload": payload, "quotes": quotes, "base_prediction": payload.get("base_prediction"), "active_model": ACTIVE_MODEL},
-        })
-
-        payload["edge_up"] = None if edge_up is None else round(edge_up, 4)
-        payload["edge_down"] = None if edge_down is None else round(edge_down, 4)
-        payload["up_ask"] = up_ask
-        payload["down_ask"] = down_ask
-        payload["recommended_action"] = action
-        payload["db_snapshot_id"] = snapshot_id
-        payload["db_prediction_id"] = prediction_id
-    except Exception as e:
-        print(f"Prediction persistence failed: {e}")
-
-
 # ─── Round-Based Prediction History ───
 prediction_rounds = {} # Key: cutoff timestamp string
 manual_baselines = {} # Key: cutoff timestamp string
@@ -478,14 +398,6 @@ def validate_old_predictions():
                             p["outcome"] = "WIN"
                         else:
                             p["outcome"] = "LOSS"
-                        if PERSIST_FROM_SERVER:
-                            db.upsert_round_result({
-                                "round_cutoff": cutoff,
-                                "baseline": baseline,
-                                "actual_close": close_price,
-                                "outcome": "UP" if is_up else "DOWN" if close_price < baseline else "TIE",
-                                "raw": p,
-                            })
                         changed = True
             
             if changed:
@@ -1023,7 +935,6 @@ def predict():
             "actual_outcome": existing_round.get("actual_outcome"),
             "outcome": existing_round.get("outcome")
         }
-        persist_live_prediction(df, df_feat, prediction_rounds[cutoff_key], quotes=quotes, market=market)
         save_predictions()
 
         return jsonify(prediction_rounds[cutoff_key])
@@ -1072,18 +983,7 @@ def rounds():
     """Get history of rounds, sorted by newest first."""
     try:
         if db.db_enabled():
-            try:
-                rows = db.fetch_recent_rounds_v2(50)
-            except Exception:
-                rows = db._get(
-                    "modeling_snapshots",
-                    {
-                        "select": "observed_at,round_cutoff,baseline,prediction,prob_up,actual_close,outcome,target_up",
-                        "order": "observed_at.desc",
-                        "limit": 500,
-                    },
-                )
-
+            rows = db.fetch_recent_rounds_v2(50)
             by_cutoff = {}
             for row in rows:
                 cutoff = int(row["round_cutoff"])
@@ -1129,12 +1029,8 @@ def stats():
     """Calculate win rate from validated rounds."""
     try:
         if db.db_enabled():
-            try:
-                bets = db.fetch_recent_signals_v2(1000)
-                source = f"{db.db_backend()}_strategy_performance_v2"
-            except Exception:
-                bets = db.fetch_recent_simulated_bets(1000)
-                source = f"{db.db_backend()}_simulated_bets"
+            bets = db.fetch_recent_signals_v2(1000)
+            source = f"{db.db_backend()}_strategy_performance_v2"
             validated_bets = [b for b in bets if b.get("result") in {"WIN", "LOSS"}]
             if validated_bets:
                 wins = len([b for b in validated_bets if b["result"] == "WIN"])
@@ -1169,12 +1065,8 @@ def signals():
     """Recent simulated entries from the configured DB."""
     try:
         limit = min(int(request.args.get("limit", 25)), 100)
-        try:
-            rows = db.fetch_recent_signals_v2(limit)
-            source = "v2"
-        except Exception:
-            rows = db.fetch_recent_simulated_bets(limit)
-            source = "v1"
+        rows = db.fetch_recent_signals_v2(limit)
+        source = "v2"
         enriched = []
         for row in rows:
             raw = row.get("raw") or {}
@@ -1258,24 +1150,6 @@ def chart_data():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/history")
-def history():
-    """Return prediction history with outcomes."""
-    now = int(time.time())
-    enriched = []
-    for h in prediction_history[-50:]:
-        entry = dict(h)
-        # Check if this window has completed
-        if now > h["next_cutoff"]:
-            entry["completed"] = True
-            # We'd need the actual close price to determine outcome
-            # For now, mark as completed
-        else:
-            entry["completed"] = False
-        enriched.append(entry)
-    return jsonify(enriched)
-
-
 @app.route("/api/model-info")
 def model_info():
     """Return model metrics and feature importance."""
@@ -1313,50 +1187,9 @@ def model_performance():
         model_cards = []
         bets = []
         if db.db_enabled():
-            try:
-                model_cards = db.fetch_model_performance_v2()
-                bets = db.fetch_recent_signals_v2(1000)
-                report = {**report, **(db.fetch_dataset_summary_v2() or {})}
-            except Exception:
-                rows = []
-                predictions = db._get(
-                    "model_predictions",
-                    {
-                        "select": "id,observed_at,round_cutoff,model_version,prediction,prob_up,confidence",
-                        "order": "observed_at.asc",
-                        "limit": 5000,
-                    },
-                )
-                results = db._get(
-                    "round_results",
-                    {
-                        "select": "round_cutoff,outcome",
-                        "order": "round_cutoff.asc",
-                        "limit": 5000,
-                    },
-                )
-                outcome_by_cutoff = {int(r["round_cutoff"]): r.get("outcome") for r in results}
-                for row in predictions:
-                    outcome = outcome_by_cutoff.get(int(row["round_cutoff"]))
-                    if outcome in {"UP", "DOWN"}:
-                        row["target_up"] = 1 if outcome == "UP" else 0
-                        rows.append(row)
-                model_rows = pd.DataFrame(rows)
-                if not model_rows.empty:
-                    model_rows["target_up"] = pd.to_numeric(model_rows["target_up"], errors="coerce")
-                    model_rows["prob_up"] = pd.to_numeric(model_rows["prob_up"], errors="coerce")
-                    model_rows["pred_up"] = (model_rows["prob_up"] >= 0.5).astype(int)
-                    model_rows["correct"] = model_rows["pred_up"].eq(model_rows["target_up"].astype(int))
-                    for version, group in model_rows.groupby("model_version", dropna=False):
-                        version_name = version or "unknown"
-                        model_cards.append({
-                            "model_version": version_name,
-                            "model_stage": "legacy",
-                            "rows_scored": int(len(group)),
-                            "unique_rounds": int(group["round_cutoff"].nunique()),
-                            "row_accuracy": round(float(group["correct"].mean() * 100), 2),
-                        })
-                bets = db.fetch_recent_simulated_bets(1000)
+            model_cards = db.fetch_model_performance_v2()
+            bets = db.fetch_recent_signals_v2(1000)
+            report = {**report, **(db.fetch_dataset_summary_v2() or {})}
 
         closed_bets = [b for b in bets if b.get("result") in {"WIN", "LOSS"}]
         wins = len([b for b in closed_bets if b.get("result") == "WIN"])
@@ -1368,7 +1201,6 @@ def model_performance():
             "active_model_version": active_model_version(),
             "db_backend": db.db_backend(),
             "edge_threshold": EDGE_THRESHOLD,
-            "persist_from_server": PERSIST_FROM_SERVER,
             "report": report,
             "models": model_cards,
             "strategy": {
@@ -1395,39 +1227,19 @@ def model_performance():
 def dataset_health():
     """Basic DB row counts and latest model dataset status."""
     try:
-        if db.sqlserver_enabled():
-            tables = [
-                "rounds",
-                "reference_prices",
-                "decision_snapshots",
-                "market_quotes",
-                "feature_snapshots",
-                "predictions_v2",
-                "signals_v2",
-                "round_results",
-                "trade_results_v2",
-                "dataset_versions",
-                "model_runs",
-            ]
-        else:
-            tables = [
-                "round_snapshots",
-                "polymarket_quotes",
-                "model_predictions",
-                "simulated_bets",
-                "round_results",
-                "polymarket_markets",
-                "rounds",
-                "reference_prices",
-                "decision_snapshots",
-                "market_quotes",
-                "feature_snapshots",
-                "predictions_v2",
-                "signals_v2",
-                "trade_results_v2",
-                "dataset_versions",
-                "model_runs",
-            ]
+        tables = [
+            "rounds",
+            "reference_prices",
+            "decision_snapshots",
+            "market_quotes",
+            "feature_snapshots",
+            "predictions_v2",
+            "signals_v2",
+            "round_results",
+            "trade_results_v2",
+            "dataset_versions",
+            "model_runs",
+        ]
         counts = {}
         for table in tables:
             try:
@@ -1435,10 +1247,7 @@ def dataset_health():
             except Exception:
                 counts[table] = None
         recent_results = db.fetch_recent_round_results(5)
-        try:
-            recent_bets = db.fetch_recent_signals_v2(5)
-        except Exception:
-            recent_bets = db.fetch_recent_simulated_bets(5)
+        recent_bets = db.fetch_recent_signals_v2(5)
         return jsonify({
             "db_enabled": db.db_enabled(),
             "db_backend": db.db_backend(),
