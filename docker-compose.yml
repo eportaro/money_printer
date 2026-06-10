@@ -52,5 +52,18 @@ services:
     profiles:
       - collector
 
+  # Tick-level websocket capture (Coinbase + Polymarket CLOB) for the
+  # lead-lag study. No DB dependency; writes gzip JSONL under data/ticks/.
+  ticks:
+    build: .
+    env_file:
+      - .env.docker
+    volumes:
+      - .:/app
+    command: python tick_collector.py
+    restart: unless-stopped
+    profiles:
+      - ticks
+
 volumes:
   mssql-data:
