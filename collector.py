@@ -25,7 +25,6 @@ load_dotenv()
 SYMBOL = active_symbol()
 PRICE_SOURCE_LABEL = source_label()
 ACTIVE_MODEL = os.getenv("ACTIVE_MODEL", "market-aware-v1")
-COLLECTOR_MODE = os.getenv("COLLECTOR_MODE", "legacy").lower()
 COLLECTOR_VERSION = os.getenv("COLLECTOR_VERSION", "collector-v2")
 FEATURE_SET_VERSION = os.getenv("FEATURE_SET_VERSION", "market-features-v1")
 STRATEGY_VERSION = os.getenv("STRATEGY_VERSION", "edge-v1")
@@ -273,122 +272,6 @@ def simulated_pnl(stake, entry_price, won):
     if not entry_price:
         return 0.0
     return float(stake) * ((1.0 / float(entry_price)) - 1.0)
-
-
-def resolve_open_simulated_bets():
-    if not db.db_enabled():
-        return {"checked": 0, "resolved": 0}
-
-    now = int(time.time())
-    open_bets = db.fetch_open_simulated_bets()
-    resolved = 0
-    if not open_bets:
-        return {"checked": 0, "resolved": 0}
-
-    df = fetch_recent_candles(20)
-    for bet in open_bets:
-        cutoff = int(bet["round_cutoff"])
-        if now <= cutoff + 15:
-            continue
-
-        matching = df[df["timestamp"] >= cutoff * 1000]
-        if matching.empty:
-            continue
-
-        actual_close = float(matching.iloc[0]["open"])
-        raw = bet.get("raw") or {}
-        baseline = raw.get("baseline")
-        if baseline is None:
-            baseline = raw.get("snapshot", {}).get("baseline")
-        if baseline is None:
-            continue
-
-        baseline = float(baseline)
-        outcome = "UP" if actual_close > baseline else "DOWN" if actual_close < baseline else "TIE"
-        won = bet["side"] == outcome
-        pnl = simulated_pnl(bet.get("stake", 10), bet.get("entry_price"), won)
-        db.update_simulated_bet(
-            bet["id"],
-            {
-                "result": "WIN" if won else "LOSS",
-                "pnl": round(pnl, 4),
-                "raw": {
-                    **raw,
-                    "resolved": {
-                        "actual_close": actual_close,
-                        "baseline": baseline,
-                        "outcome": outcome,
-                        "resolved_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                },
-            },
-        )
-        db.upsert_round_result(
-            {
-                "round_cutoff": cutoff,
-                "baseline": baseline,
-                "actual_close": actual_close,
-                "outcome": outcome,
-                "raw": {"source": "collector", "bet_id": bet["id"]},
-            }
-        )
-        resolved += 1
-
-    return {"checked": len(open_bets), "resolved": resolved}
-
-
-def resolve_recent_round_results():
-    if not db.db_enabled():
-        return {"checked": 0, "resolved": 0}
-
-    now = int(time.time())
-    snapshots = db.fetch_recent_snapshots(1000)
-    if not snapshots:
-        return {"checked": 0, "resolved": 0}
-
-    existing = {int(r["round_cutoff"]) for r in db.fetch_recent_round_results(500)}
-    by_cutoff = {}
-    for snapshot in snapshots:
-        cutoff = int(snapshot["round_cutoff"])
-        if cutoff in existing or now <= cutoff + 15:
-            continue
-        by_cutoff.setdefault(cutoff, []).append(snapshot)
-
-    if not by_cutoff:
-        return {"checked": 0, "resolved": 0}
-
-    df = fetch_recent_candles(500)
-    resolved = 0
-    for cutoff, rows in by_cutoff.items():
-        rows.sort(key=lambda row: row["observed_at"])
-        baseline = next((row.get("baseline") for row in rows if row.get("baseline") is not None), None)
-        if baseline is None:
-            continue
-
-        matching = df[df["timestamp"] >= cutoff * 1000]
-        if matching.empty:
-            continue
-
-        baseline = float(baseline)
-        actual_close = float(matching.iloc[0]["open"])
-        outcome = "UP" if actual_close > baseline else "DOWN" if actual_close < baseline else "TIE"
-        db.upsert_round_result(
-            {
-                "round_cutoff": cutoff,
-                "baseline": baseline,
-                "actual_close": actual_close,
-                "outcome": outcome,
-                "raw": {
-                    "source": "collector_snapshots",
-                    "snapshots_seen": len(rows),
-                    "first_snapshot_id": rows[0].get("id"),
-                    "last_snapshot_id": rows[-1].get("id"),
-                },
-            }
-        )
-        resolved += 1
-
-    return {"checked": len(by_cutoff), "resolved": resolved}
 
 
 def resolve_recent_round_results_v2():
@@ -803,145 +686,7 @@ def collect_once_v2(model=None, market=None):
 
 
 def collect_once(model=None, market=None):
-    if COLLECTOR_MODE == "scheduled_buckets":
-        return collect_once_v2(model=model, market=market)
-
-    model = model or load_model()
-    df = fetch_recent_candles(200)
-    current_price = float(df.iloc[-1]["close"])
-    next_cutoff = get_next_cutoff()
-    window_start = next_cutoff - WINDOW_SECONDS
-    seconds_to_cutoff = next_cutoff - int(time.time())
-
-    if market is None or market.get("event_slug") not in expected_event_slugs(next_cutoff):
-        market = discover_btc_market(window_start=window_start)
-    db.upsert_market(market)
-
-    baseline, baseline_source = baseline_from_market_or_feed(market, df, next_cutoff)
-    dist = current_price - baseline if baseline else None
-    dist_pct = (dist / baseline * 100) if baseline else None
-
-    snapshot = {
-        "observed_at": datetime.now(timezone.utc),
-        "round_cutoff": next_cutoff,
-        "window_start": window_start,
-        "seconds_to_cutoff": seconds_to_cutoff,
-        "symbol": SYMBOL,
-        "btc_price": current_price,
-        "baseline": baseline,
-        "dist_to_baseline": dist,
-        "dist_to_baseline_pct": dist_pct,
-        "source": PRICE_SOURCE_LABEL,
-        "market_condition_id": market.get("condition_id"),
-        "raw": {"market": market, "baseline_source": baseline_source},
-    }
-    snapshot_id = db.insert_round_snapshot(snapshot)
-
-    quotes = []
-    try:
-        quotes = fetch_market_quotes(market, round_cutoff=next_cutoff)
-        for quote in quotes:
-            db.insert_quote(quote)
-    except Exception as exc:
-        print(f"Polymarket quote capture failed: {exc}")
-
-    base_pred = compute_model_prediction(model, df, baseline=baseline, current_price=current_price)
-    base_edge_up, base_edge_down, _base_action = edge_from_quotes(base_pred, quotes)
-    context = {
-        "seconds_to_cutoff": seconds_to_cutoff,
-        "seconds_bucket": nearest_decision_bucket(seconds_to_cutoff),
-        "btc_price": current_price,
-        "baseline": baseline,
-        "dist_to_baseline": dist,
-        "dist_to_baseline_pct": dist_pct,
-        "base_prob_up": base_pred["prob_up"],
-        "base_prob_down": base_pred["prob_down"],
-        "base_confidence": base_pred["confidence"],
-        "base_edge_up": base_edge_up,
-        "base_edge_down": base_edge_down,
-    }
-    pred = select_prediction(ACTIVE_MODEL, base_pred, model.get("market"), context, quotes)
-    edge_up, edge_down, action = edge_from_quotes(pred, quotes)
-    baseline_exact = baseline_is_exact(baseline_source)
-    baseline_action_allowed = baseline_allows_action(baseline_source)
-    if REQUIRE_EXACT_BASELINE_FOR_ACTION and not baseline_action_allowed:
-        action = "WAIT"
-    elif not baseline_exact and seconds_to_cutoff > WINDOW_SECONDS - PROXY_BASELINE_MIN_ELAPSED_SECONDS:
-        action = "WAIT"
-    prediction_id = db.insert_prediction(
-        {
-            "observed_at": datetime.now(timezone.utc),
-            "round_cutoff": next_cutoff,
-            "model_version": pred.get("model_version", ACTIVE_MODEL),
-            "prediction": pred["prediction"],
-            "prob_up": pred["prob_up"],
-            "prob_down": pred["prob_down"],
-            "confidence": pred["confidence"],
-            "edge_up": edge_up,
-            "edge_down": edge_down,
-            "recommended_action": action,
-            "feature_values": pred.get("feature_values") or pred.get("features", {}),
-            "source_snapshot_id": snapshot_id,
-            "raw": {
-                "quotes": quotes,
-                "base_prediction": base_pred,
-                "active_model": ACTIVE_MODEL,
-                "baseline_source": baseline_source,
-                "baseline_exact": baseline_exact,
-                "baseline_action_allowed": baseline_action_allowed,
-            },
-        }
-    )
-
-    if action in {"BUY_UP", "BUY_DOWN"}:
-        side = "UP" if action == "BUY_UP" else "DOWN"
-        quote = quote_by_side(quotes, side)
-        if quote and quote.get("best_ask") is not None:
-            db.insert_simulated_bet(
-                {
-                    "observed_at": datetime.now(timezone.utc),
-                    "round_cutoff": next_cutoff,
-                    "side": side,
-                    "entry_price": quote["best_ask"],
-                    "stake": float(os.getenv("COLLECTOR_STAKE_SIZE", "1")),
-                    "model_prob": pred["prob_up"] if side == "UP" else pred["prob_down"],
-                    "edge": edge_up if side == "UP" else edge_down,
-                    "result": "OPEN",
-                    "model_prediction_id": prediction_id,
-                    "raw": {
-                        "quote": quote,
-                        "prediction": pred,
-                        "base_prediction": base_pred,
-                        "baseline": baseline,
-                        "btc_price": current_price,
-                        "seconds_to_cutoff": seconds_to_cutoff,
-                        "window_start": window_start,
-                        "market": {
-                            "question": market.get("question"),
-                            "event_slug": market.get("event_slug"),
-                            "condition_id": market.get("condition_id"),
-                            "resolution_source": market.get("resolution_source"),
-                        },
-                        "baseline_source": baseline_source,
-                    },
-                }
-            )
-
-    return {
-        "round_cutoff": next_cutoff,
-        "btc_price": current_price,
-        "baseline": baseline,
-        "baseline_source": baseline_source,
-        "baseline_exact": baseline_exact,
-        "baseline_action_allowed": baseline_action_allowed,
-        "prediction": pred["prediction"],
-        "prob_up": round(pred["prob_up"], 4),
-        "edge_up": None if edge_up is None else round(edge_up, 4),
-        "edge_down": None if edge_down is None else round(edge_down, 4),
-        "action": action,
-        "snapshot_id": snapshot_id,
-        "prediction_id": prediction_id,
-    }
+    return collect_once_v2(model=model, market=market)
 
 
 def run_forever():
@@ -954,22 +699,14 @@ def run_forever():
     interval = int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "5"))
     while True:
         try:
-            if COLLECTOR_MODE == "scheduled_buckets":
-                now = time.time()
-                if now - LAST_RESOLUTION_CHECK >= RESOLUTION_CHECK_INTERVAL_SECONDS:
-                    round_resolution = resolve_recent_round_results_v2()
-                    LAST_RESOLUTION_CHECK = now
-                    if round_resolution["resolved"] or round_resolution.get("trades_resolved"):
-                        print(f"Resolved v2 results: {round_resolution}")
-                        strategy_lab = refresh_strategy_lab()
-                        print(f"Strategy Lab refresh: {strategy_lab}")
-            else:
-                round_resolution = resolve_recent_round_results()
-                if round_resolution["resolved"]:
-                    print(f"Resolved round results: {round_resolution}")
-                resolved = resolve_open_simulated_bets()
-                if resolved["resolved"]:
-                    print(f"Resolved simulated bets: {resolved}")
+            now = time.time()
+            if now - LAST_RESOLUTION_CHECK >= RESOLUTION_CHECK_INTERVAL_SECONDS:
+                round_resolution = resolve_recent_round_results_v2()
+                LAST_RESOLUTION_CHECK = now
+                if round_resolution["resolved"] or round_resolution.get("trades_resolved"):
+                    print(f"Resolved v2 results: {round_resolution}")
+                    strategy_lab = refresh_strategy_lab()
+                    print(f"Strategy Lab refresh: {strategy_lab}")
             current_cutoff = get_next_cutoff()
             current_window_start = current_cutoff - WINDOW_SECONDS
             expected_slugs = expected_event_slugs(current_cutoff)
