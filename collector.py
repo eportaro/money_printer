@@ -631,13 +631,28 @@ def collect_once_v2(model=None, market=None):
         }
     )
 
+    # Live-signal gating. Defaults are permissive; production runs the
+    # value-aligned-v1 config (maxEntry 0.40, aligned-only, no signals after
+    # T-120s, ask_size >= 50) because the unrestricted edge rule was proven
+    # walk-forward/live negative (longshot trap in the final minutes).
     min_ask_size = float(os.getenv("MIN_ASK_SIZE", "0"))
+    max_entry_price = float(os.getenv("SIGNAL_MAX_ENTRY_PRICE", "1.0"))
+    require_aligned = os.getenv("SIGNAL_REQUIRE_ALIGNED", "false").lower() == "true"
+    exclude_below_seconds = int(os.getenv("SIGNAL_EXCLUDE_BELOW_SECONDS", "0"))
     signal_id = None
     if action in {"BUY_UP", "BUY_DOWN"}:
         side = "UP" if action == "BUY_UP" else "DOWN"
         quote = quote_by_side(quotes, side)
         ask_size = float(quote.get("ask_size") or 0) if quote else 0
-        if quote and quote.get("best_ask") is not None and (min_ask_size <= 0 or ask_size >= min_ask_size):
+        entry_ok = (
+            quote is not None
+            and quote.get("best_ask") is not None
+            and float(quote["best_ask"]) <= max_entry_price
+            and (min_ask_size <= 0 or ask_size >= min_ask_size)
+            and seconds_to_cutoff > exclude_below_seconds
+            and (not require_aligned or side == pred["prediction"])
+        )
+        if entry_ok:
             signal_id = db.insert_signal_v2(
                 {
                     "prediction_id": prediction_id,
