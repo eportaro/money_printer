@@ -37,16 +37,20 @@ docs/MODEL_TRAINING.md
 
 ```text
 collector.py                  # Ingesta de rondas, snapshots, quotes, predicciones y resultados
+tick_collector.py             # Captura tick-a-tick websocket (Coinbase + Polymarket CLOB) para lead-lag
 server.py                     # Flask API + dashboard
 model.py                      # Entrena el modelo base con 30 dias de Binance
 features.py                   # Indicadores tecnicos
+microstructure.py             # Features de microestructura (perp basis/funding, book imbalance)
 model_runtime.py              # Carga modelo base y modelo market-aware
-price_feed.py                 # Coinbase/Binance candles
+price_feed.py                 # Coinbase/Binance candles + oraculo Pyth
 polymarket.py                 # Descubrimiento de mercados y quotes Polymarket
-db.py / db_sqlserver.py       # Persistencia Supabase o SQL Server
+db.py / db_sqlserver.py       # Persistencia SQL Server (db.py es fachada)
 market_config.py              # Ventanas 15m y slugs esperados
 migrations/004_sqlserver_schema.sql
-scripts/train_model_v2.py     # Entrena modelo market-aware desde SQL Server/Supabase
+scripts/train_model_v2.py     # Entrena modelo market-aware desde SQL Server
+scripts/strategy_walkforward.py  # Walk-forward honesto de estrategias (con fees reales)
+scripts/analyze_leadlag.py    # Mide el lag spot->Polymarket con la data de tick_collector
 dashboard/                    # Frontend
 ```
 
@@ -89,14 +93,23 @@ BINANCE_SYMBOL=BTCUSDT
 WINDOW_SECONDS=900
 POLYMARKET_INTERVAL=15m
 
-DB_BACKEND=sqlserver
 SQLSERVER_CONNECTION=DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost;DATABASE=PolymarketBot;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;
 
-PERSIST_FROM_SERVER=false
-COLLECTOR_MODE=scheduled_buckets
 ADAPTIVE_CAPTURE_ENABLED=false
-ACTIVE_MODEL=base-hgb-v1
-EDGE_THRESHOLD=0.05
+ACTIVE_MODEL=market-aware-v1
+# Estrategia live value-aligned-v1 (la unica walk-forward-positiva con fees):
+EDGE_THRESHOLD=0.10
+SIGNAL_MAX_ENTRY_PRICE=0.40
+SIGNAL_REQUIRE_ALIGNED=true
+SIGNAL_EXCLUDE_BELOW_SECONDS=120
+MIN_ASK_SIZE=50
+```
+
+Para la captura tick-a-tick (estudio de latencia spot→Polymarket):
+
+```powershell
+docker compose --profile ticks up -d
+python scripts\analyze_leadlag.py --day 20260611
 ```
 
 ## Arranque con Docker
