@@ -108,6 +108,35 @@ def active_model_version():
     return ACTIVE_MODEL
 
 
+def live_strategy_config():
+    """The collector's live-signal gating, so the dashboard shows what is actually traded."""
+    return {
+        "strategy_version": os.getenv("STRATEGY_VERSION", "edge-v1"),
+        "edge_threshold": EDGE_THRESHOLD,
+        "max_entry_price": float(os.getenv("SIGNAL_MAX_ENTRY_PRICE", "1.0")),
+        "require_aligned": os.getenv("SIGNAL_REQUIRE_ALIGNED", "false").lower() == "true",
+        "exclude_below_seconds": int(os.getenv("SIGNAL_EXCLUDE_BELOW_SECONDS", "0")),
+        "min_ask_size": float(os.getenv("MIN_ASK_SIZE", "0")),
+        "stake": float(os.getenv("COLLECTOR_STAKE_SIZE", "1")),
+    }
+
+
+def tick_capture_status():
+    """Whether tick_collector.py (lead-lag study) is writing data right now."""
+    base = os.getenv("TICK_DATA_DIR", os.path.join("data", "ticks"))
+    day_dir = os.path.join(base, datetime.now(timezone.utc).strftime("%Y%m%d"))
+    try:
+        files = [os.path.join(day_dir, f) for f in os.listdir(day_dir)]
+    except OSError:
+        return {"active": False, "files_today": 0, "last_write": None}
+    last_mtime = max((os.path.getmtime(f) for f in files), default=None)
+    return {
+        "active": bool(last_mtime and time.time() - last_mtime < 600),
+        "files_today": len(files),
+        "last_write": datetime.fromtimestamp(last_mtime, timezone.utc).isoformat() if last_mtime else None,
+    }
+
+
 def load_model():
     global model, market_model, metrics, feat_importance
     try:
@@ -1316,6 +1345,8 @@ def dashboard_data():
                 "active_model_version": active_version,
                 "model_stage": MODEL_STAGE,
                 "edge_threshold": EDGE_THRESHOLD,
+                "live_strategy": live_strategy_config(),
+                "tick_capture": tick_capture_status(),
                 "signal_source": "strategy_lab",
                 "signal_sources": {
                     "strategy_lab": {

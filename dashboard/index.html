@@ -6,7 +6,7 @@
     <title>Polymarket BTC Bot Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260531-provisional-close">
+    <link rel="stylesheet" href="style.css?v=20260610-live-strategy">
 </head>
 <body>
     <header class="topbar">
@@ -93,6 +93,7 @@
                     <span class="badge" id="bucket-badge">T---</span>
                     <span class="badge" id="alignment-badge">---</span>
                     <span class="badge" id="baseline-badge">---</span>
+                    <span class="badge" id="strategy-badge" title="Estrategia live del collector">---</span>
                 </div>
             </div>
 
@@ -147,6 +148,11 @@
                     <div id="alignment-line" class="alignment-line">---</div>
                     <p>Aligned means the trade follows the model's main prediction.</p>
                     <p>Contrarian means the strategy is buying the cheap side against the model's main prediction.</p>
+                </article>
+                <article class="rule-card">
+                    <span class="label">Live Strategy Gates</span>
+                    <ul id="strategy-gates"></ul>
+                    <p class="context-copy">Lead-lag capture: <b id="tick-capture-line">---</b></p>
                 </article>
             </div>
         </section>
@@ -438,6 +444,6 @@
         </section>
     </main>
 
-    <script src="app.js?v=20260531-provisional-close"></script>
+    <script src="app.js?v=20260610-live-strategy"></script>
 </body>
 </html>

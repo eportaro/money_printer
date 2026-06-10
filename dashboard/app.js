@@ -275,6 +275,7 @@ function renderAll() {
     renderSourceContext();
     renderHeader();
     renderCurrentRoundPanel();
+    renderLiveStrategy();
     renderStrategySelector();
     renderStrategyPerformance();
     renderModelPerformance();
@@ -670,6 +671,42 @@ function renderHeader() {
     setText('hdr-signals', signals.length);
     setText('hdr-updated', new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
     updateCountdown();
+}
+
+function renderLiveStrategy() {
+    const ls = state.dashboard?.live_strategy;
+    const badge = document.getElementById('strategy-badge');
+    if (badge && ls) {
+        badge.textContent = ls.strategy_version || '---';
+        badge.className = 'badge good';
+    }
+    const list = document.getElementById('strategy-gates');
+    if (list && ls) {
+        const gates = [
+            `Edge minimo ${pct(ls.edge_threshold)}`,
+            `Entrada maxima ${fmtPrice(ls.max_entry_price)}`,
+            ls.require_aligned ? 'Solo el lado alineado con el modelo' : 'Permite lado contrarian',
+            ls.exclude_below_seconds > 0 ? `Sin senales despues de T-${ls.exclude_below_seconds}s` : 'Opera hasta el cierre',
+            ls.min_ask_size > 0 ? `Liquidez ask >= ${ls.min_ask_size}` : 'Sin filtro de liquidez',
+        ];
+        list.innerHTML = '';
+        gates.forEach((gate) => {
+            const li = document.createElement('li');
+            li.textContent = gate;
+            list.appendChild(li);
+        });
+    }
+    const tick = state.dashboard?.tick_capture;
+    const line = document.getElementById('tick-capture-line');
+    if (line) {
+        if (tick && tick.active) {
+            line.textContent = `ON (${tick.files_today} archivos hoy)`;
+            line.style.color = 'var(--good, #2ecc71)';
+        } else {
+            line.textContent = tick ? 'OFF' : '---';
+            line.style.color = '';
+        }
+    }
 }
 
 function updateCountdown() {
