@@ -4,7 +4,9 @@
 # Core data & ML
 numpy>=1.26
 pandas>=2.0
-scikit-learn>=1.4
+# Pinned: model_artifacts/*.pkl are pickled under 1.8; sklearn 1.9 moved private
+# modules (_loss) and cannot unpickle them. Bump only together with a retrain.
+scikit-learn==1.8.0
 
 # HTTP
 requests>=2.31
