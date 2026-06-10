@@ -17,6 +17,7 @@ from model_runtime import (
     select_prediction,
 )
 from market_config import WINDOW_SECONDS, next_cutoff as configured_next_cutoff, round_id as configured_round_id, slug_candidates
+from microstructure import fetch_micro_features
 from polymarket import PolymarketError, discover_btc_market, fetch_event_prices, fetch_market_quotes
 from price_feed import active_symbol, fetch_recent_candles, oracle_price_at, source_label
 
@@ -503,6 +504,13 @@ def collect_once_v2(model=None, market=None):
         print(f"Polymarket quote capture failed: {exc}")
 
     base_pred = compute_model_prediction(model, df, baseline=baseline, current_price=current_price)
+    # Microstructure features (perp basis/funding, spot book imbalance) are only
+    # fetched when a scheduled bucket is about to be stored, and are merged into
+    # the prediction inputs BEFORE inference so training and serving see the
+    # same feature dict.
+    scheduled_bucket_due = scheduled_bucket_to_capture(round_pk, seconds_to_cutoff)
+    if scheduled_bucket_due is not None:
+        base_pred["features"] = {**base_pred.get("features", {}), **fetch_micro_features()}
     base_edge_up, base_edge_down, _base_action = edge_from_quotes(base_pred, quotes)
     context = {
         "seconds_to_cutoff": seconds_to_cutoff,
@@ -526,7 +534,7 @@ def collect_once_v2(model=None, market=None):
     elif not baseline_exact and seconds_to_cutoff > WINDOW_SECONDS - PROXY_BASELINE_MIN_ELAPSED_SECONDS:
         action = "WAIT"
 
-    seconds_bucket = scheduled_bucket_to_capture(round_pk, seconds_to_cutoff)
+    seconds_bucket = scheduled_bucket_due
     capture_reason = "scheduled" if seconds_bucket is not None else adaptive_capture_reason(
         seconds_to_cutoff,
         dist_pct,

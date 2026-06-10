@@ -239,7 +239,10 @@ def _flatten_training_features(frame):
     # technical features (collapsing repeated feat__ prefixes), dropping leaked model
     # outputs / poly_* dupes. Otherwise the test-split eval feeds the model different
     # features than it was trained on and the metrics are bogus.
-    allowed = set(FEATURE_COLUMNS)
+    from microstructure import MICRO_FEATURE_COLUMNS
+
+    tech_columns = list(FEATURE_COLUMNS) + list(MICRO_FEATURE_COLUMNS)
+    allowed = set(tech_columns)
     feature_rows = []
     for item in frame.get("features", []):
         if isinstance(item, dict):
@@ -262,10 +265,10 @@ def _flatten_training_features(frame):
                 clean[f"feat__{base_name}"] = value
         feature_rows.append(clean)
     features = pd.DataFrame(feature_rows)
-    for col in (f"feat__{name}" for name in FEATURE_COLUMNS):
+    for col in (f"feat__{name}" for name in tech_columns):
         if col not in features.columns:
             features[col] = np.nan
-    features = features[[f"feat__{name}" for name in FEATURE_COLUMNS]]
+    features = features[[f"feat__{name}" for name in tech_columns]]
     base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
     matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")

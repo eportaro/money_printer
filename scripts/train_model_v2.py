@@ -25,13 +25,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import db
 from features import FEATURE_COLUMNS
+from microstructure import MICRO_FEATURE_COLUMNS
 
 load_dotenv()
 
-# Only these technical features are valid model inputs. Anything else found in the
-# stored feature JSON (model outputs like prob_up/edge/confidence, poly_* quotes,
-# or feat__-duplicated keys from old collector versions) is leakage and is dropped.
-ALLOWED_TECH_FEATURES = set(FEATURE_COLUMNS)
+# Only these technical + microstructure features are valid model inputs. Anything
+# else found in the stored feature JSON (model outputs like prob_up/edge/confidence,
+# poly_* quotes, or feat__-duplicated keys from old collector versions) is leakage
+# and is dropped.
+TECH_FEATURE_COLUMNS = list(FEATURE_COLUMNS) + list(MICRO_FEATURE_COLUMNS)
+ALLOWED_TECH_FEATURES = set(TECH_FEATURE_COLUMNS)
 
 
 def _strip_feat_prefix(key):
@@ -96,10 +99,10 @@ def flatten_features(frame):
         feature_rows.append(clean)
     features = pd.DataFrame(feature_rows)
     # Guarantee a stable, complete technical column set (missing -> NaN -> imputed).
-    for col in (f"feat__{name}" for name in FEATURE_COLUMNS):
+    for col in (f"feat__{name}" for name in TECH_FEATURE_COLUMNS):
         if col not in features.columns:
             features[col] = np.nan
-    features = features[[f"feat__{name}" for name in FEATURE_COLUMNS]]
+    features = features[[f"feat__{name}" for name in TECH_FEATURE_COLUMNS]]
     base = frame[[col for col in CONTEXT_COLUMNS + QUOTE_COLUMNS if col in frame]].copy()
     matrix = pd.concat([base.reset_index(drop=True), features.reset_index(drop=True)], axis=1)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")
