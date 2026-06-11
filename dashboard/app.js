@@ -3,7 +3,18 @@ const EDGE_BASE_KEY = 'edgebase';
 const LAST_ALLOWED_SIGNAL_BUCKET = 30;
 const EDGE_BASE_MIN_ENTRY = 0.05;
 const PROVISIONAL_CLOSE_AFTER_SECONDS = 20;
-const SOURCE_VERSION = 'dashboard-source-v22-provisional-close';
+const SOURCE_VERSION = 'dashboard-source-v23-live-strategy';
+// Maps the collector's STRATEGY_VERSION (stored on each real signal) to its
+// Strategy Lab card, so live paper trades land on the strategy that produced
+// them instead of all piling into Edge Base.
+const LIVE_STRATEGY_CARD_KEYS = {
+    'edge-v1': EDGE_BASE_KEY,
+    'value-aligned-v1': 'value_aligned'
+};
+
+function liveStrategyCardKey() {
+    return LIVE_STRATEGY_CARD_KEYS[state.dashboard?.live_strategy?.strategy_version] || EDGE_BASE_KEY;
+}
 
 function initialSignalSource() {
     const savedVersion = localStorage.getItem('dashboardSourceVersion');
@@ -16,6 +27,8 @@ function initialSignalSource() {
     }
     if (savedVersion !== SOURCE_VERSION) {
         localStorage.setItem('dashboardSourceVersion', SOURCE_VERSION);
+        // New dashboard version: default the selected strategy to the one live in prod.
+        localStorage.setItem('selectedStrategy', 'value_aligned');
     }
     return saved;
 }
@@ -81,13 +94,13 @@ const STRATEGIES = {
     },
     value_aligned: {
         name: 'Value Aligned',
-        description: 'Longshot solo cuando el modelo coincide con la direccion de la apuesta. Sin contrarian.',
+        description: 'La estrategia LIVE en produccion: entrada barata (<=0.40) solo cuando el modelo coincide con la direccion, edge >= 10%, liquidez >= 50 y sin senales en los ultimos 2 minutos. Unica walk-forward-positiva despues de fees.',
         allowedBuckets: BUCKETS.slice(),
         minProb: 0.40,
         minEdge: 0.10,
         allowContrarian: false,
         maxEntry: 0.40,
-        excludeBelow: 0,
+        excludeBelow: 120,
         minAskSize: 50,
         badge: 'ALIGNED'
     },
@@ -119,8 +132,10 @@ const STRATEGIES = {
 };
 
 function initialStrategy() {
+    // On a dashboard version bump, jump to the strategy actually live in prod.
+    if (localStorage.getItem('dashboardSourceVersion') !== SOURCE_VERSION) return 'value_aligned';
     const saved = localStorage.getItem('selectedStrategy');
-    return STRATEGIES[saved] ? saved : EDGE_BASE_KEY;
+    return STRATEGIES[saved] ? saved : 'value_aligned';
 }
 
 let state = {
@@ -313,22 +328,31 @@ function modelTestSignals() {
 }
 
 function liveStrategyReplaySignals() {
+    // The strategy actually running in prod is represented by its REAL trades;
+    // replaying it on top would double-count it, so skip it in the simulation.
+    const skipKeys = new Set([EDGE_BASE_KEY, liveStrategyCardKey()]);
     return edgeBaseSignals()
-        .concat(replaySignalsFromForecasts(selectedPredictions(), new Set())
+        .concat(replaySignalsFromForecasts(selectedPredictions(), new Set(), skipKeys)
             .map(signal => ({ ...signal, model_stage: 'live_strategy_replay', reason: `Post-production strategy replay: ${signal.reason}` })))
         .sort((a, b) => dateMs(b.observed_at) - dateMs(a.observed_at));
 }
 
 function edgeBaseSignals() {
+    // Real collector trades, mapped to the Strategy Lab card of the strategy
+    // version that actually generated them (edge-v1 history stays under Edge
+    // Base; value-aligned-v1 trades land on Value Aligned).
     return (state.dashboard?.actual_live_trades || state.dashboard?.live_active_signals || [])
-        .map(signal => ({
-            ...signal,
-            strategy_version: EDGE_BASE_KEY,
-            strategy_name: STRATEGIES[EDGE_BASE_KEY].name,
-            model_stage: signal.model_stage || 'edge_base_live',
-            reason: signal.reason || 'Collector edge base rule'
-        }))
-        .filter(edgeBaseSignalAllowed);
+        .map(signal => {
+            const cardKey = LIVE_STRATEGY_CARD_KEYS[signal.strategy_version] || EDGE_BASE_KEY;
+            return {
+                ...signal,
+                strategy_version: cardKey,
+                strategy_name: STRATEGIES[cardKey].name,
+                model_stage: signal.model_stage || 'collector_live',
+                reason: signal.reason || `Collector live rule (${signal.strategy_version || 'edge-v1'})`
+            };
+        })
+        .filter(signal => signal.strategy_version !== EDGE_BASE_KEY || edgeBaseSignalAllowed(signal));
 }
 
 function edgeBaseReplaySignals(forecasts, modelStage) {
@@ -483,14 +507,14 @@ function strategyLabPredictions() {
     return Array.from(bySnapshot.values()).sort((a, b) => dateMs(b.observed_at) - dateMs(a.observed_at));
 }
 
-function replaySignalsFromForecasts(forecasts, seenSnapshots) {
+function replaySignalsFromForecasts(forecasts, seenSnapshots, skipKeys = new Set([EDGE_BASE_KEY])) {
     const rows = [];
     const stake = 1;
     (forecasts || []).forEach(forecast => {
         if (!forecast.snapshot_id || seenSnapshots.has(forecast.snapshot_id)) return;
         const resolved = forecast.outcome === 'UP' || forecast.outcome === 'DOWN';
         Object.entries(STRATEGIES).forEach(([key, strategy]) => {
-            if (key === EDGE_BASE_KEY) return;
+            if (skipKeys.has(key)) return;
             const decision = replayDecision(forecast, strategy);
             if (!decision) return;
             const won = resolved && decision.side === forecast.outcome;
@@ -896,7 +920,9 @@ function renderStrategySelector() {
         card.className = `strategy-card ${state.selectedStrategy === key ? 'active' : ''}`;
         const winRateDisplay = perf.total_signals >= 3 ? pct(perf.wins / perf.total_signals) : '---';
         const sampleBadge = perf.total_signals < 10 ? `<span class="badge low-sample">LOW SAMPLE</span>` : '';
-        const activeBadge = key === state.selectedStrategy ? `<span class="badge active-model">ACTIVE</span>` : '';
+        const activeBadge = key === liveStrategyCardKey()
+            ? `<span class="badge active-model" title="Estrategia que el collector opera en produccion">LIVE EN PROD</span>`
+            : '';
         card.innerHTML = `
             <h3>${strategy.name} ${activeBadge} ${sampleBadge}</h3>
             <p>${strategy.description}</p>
